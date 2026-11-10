@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
@@ -132,6 +133,40 @@ def search_techniques(query: str) -> dict[str, Any]:
         or needle in t["tactic"].lower()
     ]
     return {"status": "ok", "query": query, "matches": hits}
+
+
+def rank_techniques(
+    incident: dict[str, Any],
+    enriched_iocs: list[dict[str, Any]],
+    *,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Return a deterministic shortlist from the local ATT&CK catalog.
+
+    This lexical pass is intentionally conservative: it can only return entries
+    that exist in the bundled catalog, and gives Jev a small, relevant batch to
+    re-rank instead of sending the whole catalog to the investigator.
+    """
+    context = json.dumps(
+        {"incident": incident, "enriched_iocs": enriched_iocs},
+        default=str,
+    ).lower()
+    tokens = set(re.findall(r"[a-z0-9]+", context))
+    category = str(incident.get("category", "")).lower().replace("_", " ")
+    candidates: list[tuple[int, int, dict[str, str]]] = []
+    for index, technique in enumerate(_attack_catalog()):
+        words = set(
+            re.findall(
+                r"[a-z0-9]+",
+                f"{technique['name']} {technique['tactic']}",
+            )
+        )
+        score = len(words & tokens)
+        if category and category in technique["name"].lower():
+            score += 3
+        candidates.append((score, -index, technique))
+    candidates.sort(reverse=True, key=lambda item: (item[0], item[1]))
+    return [technique for _, _, technique in candidates[: max(1, limit)]]
 
 
 # --------------------------------------------------------------------------

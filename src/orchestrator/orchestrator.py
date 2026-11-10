@@ -166,7 +166,11 @@ def run_case(
     inv_toolbox = investigator_toolbox or Toolbox(names=INVESTIGATOR_TOOLS)
     try:
         investigation = investigate(
-            incident, client=client, model=investigator_model, toolbox=inv_toolbox
+            incident,
+            client=client,
+            model=investigator_model,
+            toolbox=inv_toolbox,
+            jev_engine=jev_engine,
         )
     except _llm.LLMError as exc:
         raise OrchestratorError(f"investigation failed: {exc}") from exc

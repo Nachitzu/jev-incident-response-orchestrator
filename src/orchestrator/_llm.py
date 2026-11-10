@@ -25,6 +25,7 @@ from pydantic import BaseModel
 # inputs and get the stronger one.
 DETECTOR_MODEL = "claude-haiku-4-5-20251001"
 INVESTIGATOR_MODEL = "claude-sonnet-5"
+INVESTIGATOR_FAST_MODEL = "claude-haiku-4-5-20251001"
 RESPONDER_MODEL = "claude-sonnet-5"
 
 MAX_TOKENS = 4096

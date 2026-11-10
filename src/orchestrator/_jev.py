@@ -181,6 +181,46 @@ class JevEngine:
         )
         return {k: v.noul for k, v in resp.nouls.items()}
 
+    def rerank_attack_techniques(
+        self,
+        incident_data: dict[str, Any],
+        enriched_iocs: list[dict[str, Any]],
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Re-rank a catalog-only shortlist with Jev's semantic Nouls."""
+        if not self._client or not candidates:
+            return candidates
+        questions = {
+            f"technique_{index}": Noul(
+                instructions=(
+                    "Does this MITRE ATT&CK technique best explain the observed "
+                    "incident and enriched IOCs? Consider only evidence in state. "
+                    f"Candidate technique: {candidate}"
+                )
+            )
+            for index, candidate in enumerate(candidates)
+        }
+        resp = self._client.system_one(
+            state={
+                "incident": incident_data,
+                "offline_threat_intel_iocs": enriched_iocs,
+                "mitre_candidates": candidates,
+            },
+            questions=questions,
+        )
+        ranked = [
+            (resp.nouls[f"technique_{index}"].noul, index, candidate)
+            for index, candidate in enumerate(candidates)
+        ]
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return [
+            {**candidate, "jev_relevance": score}
+            for score, _, candidate in ranked
+        ]
+
+    # Short alias for callers that describe the operation without the ATT&CK name.
+    rerank_techniques = rerank_attack_techniques
+
     def score_response_steps(
         self,
         incident_data: dict[str, Any],

@@ -21,9 +21,10 @@ Process:
 1. For each observable in the incident, use its reputation result to build an
    `enriched_observables` entry (reputation is one of malicious|suspicious|benign|
    unknown; source is where it came from, e.g. "local_intel").
-2. Map the activity to MITRE ATT&CK. You MUST verify every technique_id against the
-   catalog; include ONLY ids that verify (status "ok"). Never emit an unverified
-   T#### — a hallucinated technique is worse than none.
+2. If a `<mitre_shortlist>` is provided, treat it as the candidate set and select
+   only techniques from it. Map the activity to MITRE ATT&CK. You MUST verify every
+   technique_id against the catalog; include ONLY ids that verify (status "ok").
+   Never emit an unverified T#### — a hallucinated technique is worse than none.
 3. Write a `hypothesis`: a short narrative of what the attacker is doing.
 4. Cite at least one concrete piece of `evidence` (a log line, an observable, a tool
    result). Evidence must not be empty and must not be blank strings.
