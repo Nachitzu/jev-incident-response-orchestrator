@@ -88,3 +88,13 @@ class Observable(BaseModel):
         elif self.type == "email" and "@" not in self.value:
             raise ValueError(f"not a valid email address: {self.value!r}")
         return self
+
+class SystemOneTelemetry(BaseModel):
+    """Telemetría auditable de las primitivas de Jev (Noul, Choice, Score)."""
+    prompt_injection_noul: float | None = Field(default=None, ge=0.0, le=1.0)
+    threat_noul: float | None = Field(default=None, ge=0.0, le=1.0)
+    category_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    severity_score: float | None = Field(default=None, ge=0.0, le=3.0)
+    severity_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    grounding_nouls: dict[str, float] = Field(default_factory=dict)
+    escalated_by_cascade: bool = False

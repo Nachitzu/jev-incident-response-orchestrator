@@ -47,6 +47,7 @@ class PlaybookStep(BaseModel):
     requires_approval: bool
     automatable: bool = False
     justification: str = Field(min_length=1)
+    blast_radius_score: float | None = None
 
     @property
     def is_destructive(self) -> bool:
@@ -64,6 +65,12 @@ class PlaybookStep(BaseModel):
                 f"action {self.action!r} cannot be both automatable and require "
                 "approval; automation is reserved for safe, non-destructive steps"
             )
+        if blast_radius_score >= 1.5 or hitl_noul >= 0.50:
+            raise ValueError(
+                f"step {self.action!r} has a high blast radius or hitl score; "
+                "it must require human approval"
+            )
+            requires_approval = True
         return self
 
 

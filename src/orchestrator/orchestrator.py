@@ -92,6 +92,7 @@ def run_case(
     responder_model: str = _llm.RESPONDER_MODEL,
     investigator_toolbox: Toolbox | None = None,
     responder_toolbox: Toolbox | None = None,
+    jev_engine: Any | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> CaseReport:
     """Run one scenario end to end and return its case report.
@@ -107,9 +108,22 @@ def run_case(
     started = now()
 
     try:
-        detection = detect(events, client=client, model=detector_model)
+        detection = detect(
+            events, client=client, model=detector_model, jev_engine=jev_engine
+        )
     except _llm.LLMError as exc:
         raise OrchestratorError(f"detection failed: {exc}") from exc
+
+    detection_decision = (
+        f"escalate: {detection.incident.title}"
+        if detection.escalate and detection.incident is not None
+        else f"drop: {detection.drop_reason}"
+    )
+    if (
+        detection.incident is not None
+        and "Prompt-injection alert" in detection.incident.rationale
+    ):
+        detection_decision += " [PROMPT-INJECTION ALERT: payload severity override blocked]"
 
     audit.append(
         AuditEntry(
@@ -117,11 +131,7 @@ def run_case(
             stage="detection",
             agent="DetectorAgent",
             model=detector_model,
-            decision=(
-                f"escalate: {detection.incident.title}"
-                if detection.escalate and detection.incident is not None
-                else f"drop: {detection.drop_reason}"
-            ),
+            decision=detection_decision,
             inputs_digest=_digest(events),
         )
     )
