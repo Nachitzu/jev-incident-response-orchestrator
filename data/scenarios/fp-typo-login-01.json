@@ -1,0 +1,17 @@
+[
+  {
+    "severity_hint": "low",
+    "source_ip": "10.0.5.58",
+    "dest_ip": "10.0.1.40",
+    "user": "l.moreno",
+    "host": "ws-58",
+    "observables": [
+      "10.0.5.58"
+    ],
+    "event_id": "fp-typo-login-01-e1",
+    "timestamp": "2026-07-08T09:01:00Z",
+    "source": "EDR",
+    "event_type": "authentication_failure",
+    "raw_log": "3 failed logins for l.moreno from internal ws-58 (password typo), then success from same host"
+  }
+]

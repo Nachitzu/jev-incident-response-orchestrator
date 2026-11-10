@@ -1,0 +1,17 @@
+[
+  {
+    "severity_hint": "medium",
+    "source_ip": "203.0.113.55",
+    "dest_ip": "10.0.1.12",
+    "user": null,
+    "host": null,
+    "observables": [
+      "203.0.113.55"
+    ],
+    "event_id": "recon-portscan-01-e1",
+    "timestamp": "2026-07-08T11:22:10Z",
+    "source": "IDS",
+    "event_type": "port_scan",
+    "raw_log": "SYN scan of 1024 ports on 10.0.1.12 from external 203.0.113.55 in 8s"
+  }
+]

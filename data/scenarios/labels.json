@@ -1,0 +1,62 @@
+{
+  "phishing-01": {
+    "escalate": true,
+    "category": "phishing",
+    "expected_severity": "HIGH"
+  },
+  "brute-force-01": {
+    "escalate": true,
+    "category": "brute_force",
+    "expected_severity": "HIGH"
+  },
+  "malware-beacon-01": {
+    "escalate": true,
+    "category": "malware",
+    "expected_severity": "CRITICAL"
+  },
+  "exfiltration-01": {
+    "escalate": true,
+    "category": "exfiltration",
+    "expected_severity": "CRITICAL"
+  },
+  "lateral-movement-01": {
+    "escalate": true,
+    "category": "lateral_movement",
+    "expected_severity": "HIGH"
+  },
+  "recon-portscan-01": {
+    "escalate": true,
+    "category": "recon",
+    "expected_severity": "MEDIUM"
+  },
+  "malware-quarantined-01": {
+    "escalate": true,
+    "category": "malware",
+    "expected_severity": "HIGH"
+  },
+  "phishing-reported-01": {
+    "escalate": true,
+    "category": "phishing",
+    "expected_severity": "LOW"
+  },
+  "fp-scanner-01": {
+    "escalate": false,
+    "category": null,
+    "expected_severity": null
+  },
+  "fp-backup-01": {
+    "escalate": false,
+    "category": null,
+    "expected_severity": null
+  },
+  "fp-patch-01": {
+    "escalate": false,
+    "category": null,
+    "expected_severity": null
+  },
+  "fp-typo-login-01": {
+    "escalate": false,
+    "category": null,
+    "expected_severity": null
+  }
+}

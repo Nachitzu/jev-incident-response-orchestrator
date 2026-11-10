@@ -1,0 +1,15 @@
+[
+  {
+    "severity_hint": "info",
+    "source_ip": "10.0.5.33",
+    "dest_ip": null,
+    "user": "SYSTEM",
+    "host": "ws-33",
+    "observables": [],
+    "event_id": "fp-patch-01-e1",
+    "timestamp": "2026-07-08T04:10:00Z",
+    "source": "EDR",
+    "event_type": "process_creation",
+    "raw_log": "wusa.exe installed KB5030219 during the approved maintenance window; signed by Microsoft"
+  }
+]

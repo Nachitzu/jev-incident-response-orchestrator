@@ -1,0 +1,17 @@
+{
+  "_comment": "Offline threat-intel dataset for the Claude Code console mode (no API). Keyed by indicator value. Reputation is one of malicious|suspicious|benign|unknown. Internal RFC1918 addresses are benign; the malicious/suspicious entries mirror the observables that appear in data/scenarios/*.json so /soar-investigate works fully offline.",
+  "indicators": {
+    "185.220.101.34": {"type": "ip", "reputation": "malicious", "detail": {"category": "tor_exit_bruteforce", "note": "known SSH/RDP brute-force source; Tor exit node"}},
+    "193.201.224.9": {"type": "ip", "reputation": "malicious", "detail": {"category": "exfiltration_sink", "note": "bulletproof-hosted data exfiltration endpoint"}},
+    "91.219.236.18": {"type": "ip", "reputation": "malicious", "detail": {"category": "c2", "note": "malware command-and-control server"}},
+    "45.133.1.77": {"type": "ip", "reputation": "malicious", "detail": {"category": "phishing_c2", "note": "hosts credential-harvest landing page"}},
+    "203.0.113.55": {"type": "ip", "reputation": "suspicious", "detail": {"category": "scanner", "note": "recurrent external port-scanner"}},
+    "a3f9.dyn-c2.net": {"type": "domain", "reputation": "malicious", "detail": {"category": "c2", "note": "dynamic-DNS beacon domain"}},
+    "paypa1-secure.com": {"type": "domain", "reputation": "malicious", "detail": {"category": "phishing", "note": "PayPal typosquat, SPF/DKIM fail"}},
+    "corp-benefits-portal.com": {"type": "domain", "reputation": "suspicious", "detail": {"category": "phishing", "note": "newly registered look-alike domain, user-reported"}},
+    "http://paypa1-secure.com/login": {"type": "url", "reputation": "malicious", "detail": {"category": "phishing", "note": "credential-harvest login page"}},
+    "billing@paypa1-secure.com": {"type": "email", "reputation": "malicious", "detail": {"category": "phishing_sender"}},
+    "hr-update@corp-benefits-portal.com": {"type": "email", "reputation": "suspicious", "detail": {"category": "phishing_sender"}},
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": {"type": "sha256", "reputation": "malicious", "detail": {"category": "malware", "note": "hash flagged by EDR; sample quarantined"}}
+  }
+}

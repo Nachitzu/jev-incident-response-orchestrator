@@ -1,0 +1,71 @@
+{
+  "_comment": "NIST 800-61-aligned response playbooks, one per incident category, keyed by category. The responder selects by incident.category, adapts steps to the investigation, and prioritizes by 'order'. Steps obey the ResponsePlan/PlaybookStep contract: any action containing a destructive marker (isolate/quarantine/disable/block/wipe/delete/reimage/shutdown/kill process/revoke/reset password) sets requires_approval=true, and automatable steps are never destructive.",
+  "playbooks": {
+    "phishing": {
+      "playbook_name": "Phishing response (NIST 800-61)",
+      "category": "phishing",
+      "steps": [
+        {"order": 1, "phase": "containment", "action": "Open an incident ticket and notify the targeted user", "requires_approval": false, "automatable": true, "justification": "Non-destructive coordination; safe to automate."},
+        {"order": 2, "phase": "containment", "action": "Block the sender domain and phishing URL at the mail gateway and proxy", "requires_approval": true, "automatable": false, "justification": "Disrupts mail flow / browsing; analyst must confirm scope."},
+        {"order": 3, "phase": "eradication", "action": "Reset password for the targeted account", "requires_approval": true, "automatable": false, "justification": "Account-impacting; requires human approval."},
+        {"order": 4, "phase": "eradication", "action": "Purge delivered copies of the email from all mailboxes", "requires_approval": false, "automatable": true, "justification": "Reversible mail-flow action, safe to automate."},
+        {"order": 5, "phase": "recovery", "action": "Confirm no credential reuse and close the ticket", "requires_approval": false, "automatable": true, "justification": "Verification and closure."}
+      ]
+    },
+    "brute_force": {
+      "playbook_name": "Brute-force response (NIST 800-61)",
+      "category": "brute_force",
+      "steps": [
+        {"order": 1, "phase": "containment", "action": "Open incident ticket and correlate the source IP against authentication logs", "requires_approval": false, "automatable": true, "justification": "Read-only correlation; safe to automate."},
+        {"order": 2, "phase": "containment", "action": "Block the offending source IP at the firewall", "requires_approval": true, "automatable": false, "justification": "Perimeter change; analyst must confirm it is not shared infrastructure."},
+        {"order": 3, "phase": "eradication", "action": "Disable the targeted account pending review", "requires_approval": true, "automatable": false, "justification": "Account lockout impacts the user; needs approval."},
+        {"order": 4, "phase": "eradication", "action": "Reset password and enforce MFA for the account", "requires_approval": true, "automatable": false, "justification": "Credential change; human-in-the-loop."},
+        {"order": 5, "phase": "recovery", "action": "Re-enable the account and monitor for repeat attempts", "requires_approval": false, "automatable": false, "justification": "Judgment call to restore service; not automated."}
+      ]
+    },
+    "malware": {
+      "playbook_name": "Malware response (NIST 800-61)",
+      "category": "malware",
+      "steps": [
+        {"order": 1, "phase": "containment", "action": "Isolate the affected host from the network", "requires_approval": true, "automatable": false, "justification": "Removes host from network; must be approved."},
+        {"order": 2, "phase": "containment", "action": "Open incident ticket and snapshot the host for forensics", "requires_approval": false, "automatable": true, "justification": "Preserves evidence; safe to automate."},
+        {"order": 3, "phase": "eradication", "action": "Kill process and remove the malicious binary", "requires_approval": true, "automatable": false, "justification": "Destructive on-host action; requires approval."},
+        {"order": 4, "phase": "eradication", "action": "Block the C2 domain and IP at the firewall and DNS", "requires_approval": true, "automatable": false, "justification": "Perimeter change; analyst confirmation."},
+        {"order": 5, "phase": "recovery", "action": "Reimage the host from a known-good image", "requires_approval": true, "automatable": false, "justification": "Wipes the host; explicit approval required."},
+        {"order": 6, "phase": "recovery", "action": "Restore user data and return the host to service", "requires_approval": false, "automatable": false, "justification": "Verification before return to service."}
+      ]
+    },
+    "exfiltration": {
+      "playbook_name": "Data exfiltration response (NIST 800-61)",
+      "category": "exfiltration",
+      "steps": [
+        {"order": 1, "phase": "containment", "action": "Open incident ticket and quantify the data volume transferred", "requires_approval": false, "automatable": true, "justification": "Read-only scoping; safe to automate."},
+        {"order": 2, "phase": "containment", "action": "Block the destination IP and throttle egress for the host", "requires_approval": true, "automatable": false, "justification": "Perimeter/egress change; analyst confirmation."},
+        {"order": 3, "phase": "containment", "action": "Isolate the source host", "requires_approval": true, "automatable": false, "justification": "Network isolation; must be approved."},
+        {"order": 4, "phase": "eradication", "action": "Revoke credentials and tokens used in the transfer", "requires_approval": true, "automatable": false, "justification": "Credential revocation; human-in-the-loop."},
+        {"order": 5, "phase": "recovery", "action": "Engage DLP and legal review and document the scope", "requires_approval": false, "automatable": false, "justification": "Cross-team judgment; not automated."}
+      ]
+    },
+    "lateral_movement": {
+      "playbook_name": "Lateral movement response (NIST 800-61)",
+      "category": "lateral_movement",
+      "steps": [
+        {"order": 1, "phase": "containment", "action": "Open incident ticket and map the movement path across hosts", "requires_approval": false, "automatable": true, "justification": "Read-only mapping; safe to automate."},
+        {"order": 2, "phase": "containment", "action": "Isolate the compromised hosts along the path", "requires_approval": true, "automatable": false, "justification": "Network isolation; requires approval."},
+        {"order": 3, "phase": "eradication", "action": "Disable the accounts used for the pivot", "requires_approval": true, "automatable": false, "justification": "Account lockout; human-in-the-loop."},
+        {"order": 4, "phase": "eradication", "action": "Block SMB and RDP between the affected segments", "requires_approval": true, "automatable": false, "justification": "Segmentation change; analyst confirmation."},
+        {"order": 5, "phase": "recovery", "action": "Rotate credentials and restore segmentation", "requires_approval": false, "automatable": false, "justification": "Verification and restoration."}
+      ]
+    },
+    "recon": {
+      "playbook_name": "Reconnaissance response (NIST 800-61)",
+      "category": "recon",
+      "steps": [
+        {"order": 1, "phase": "containment", "action": "Open incident ticket and log the scanning source", "requires_approval": false, "automatable": true, "justification": "Read-only logging; safe to automate."},
+        {"order": 2, "phase": "containment", "action": "Block the scanning source IP at the perimeter", "requires_approval": true, "automatable": false, "justification": "Perimeter change; analyst confirmation."},
+        {"order": 3, "phase": "eradication", "action": "Review services exposed by the scan and harden them", "requires_approval": false, "automatable": false, "justification": "Judgment-driven hardening; not automated."},
+        {"order": 4, "phase": "recovery", "action": "Confirm no follow-on exploitation and close the ticket", "requires_approval": false, "automatable": true, "justification": "Verification and closure."}
+      ]
+    }
+  }
+}

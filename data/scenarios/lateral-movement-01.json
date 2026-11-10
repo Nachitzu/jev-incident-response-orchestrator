@@ -1,0 +1,33 @@
+[
+  {
+    "severity_hint": "high",
+    "source_ip": "10.0.5.118",
+    "dest_ip": "10.0.1.30",
+    "user": "svc_backup",
+    "host": "fs01",
+    "observables": [
+      "10.0.5.118",
+      "10.0.1.30"
+    ],
+    "event_id": "lateral-movement-01-e1",
+    "timestamp": "2026-07-08T16:03:20Z",
+    "source": "EDR",
+    "event_type": "remote_service_creation",
+    "raw_log": "PsExec-style service 'PSEXESVC' created on fs01 from ws-118 using svc_backup token"
+  },
+  {
+    "severity_hint": "medium",
+    "source_ip": "10.0.5.118",
+    "dest_ip": "10.0.1.30",
+    "user": "svc_backup",
+    "host": "fs01",
+    "observables": [
+      "10.0.5.118"
+    ],
+    "event_id": "lateral-movement-01-e2",
+    "timestamp": "2026-07-08T16:05:02Z",
+    "source": "EDR",
+    "event_type": "smb_admin_share_access",
+    "raw_log": "ADMIN$ share on fs01 accessed from 10.0.5.118, followed by remote file write"
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {
+    "severity_hint": "medium",
+    "source_ip": "10.0.9.15",
+    "dest_ip": "10.0.1.12",
+    "user": null,
+    "host": null,
+    "observables": [
+      "10.0.9.15"
+    ],
+    "event_id": "fp-scanner-01-e1",
+    "timestamp": "2026-07-08T23:14:00Z",
+    "source": "IDS",
+    "event_type": "port_scan",
+    "raw_log": "Vulnerability scan of 10.0.1.0/24 from authorized scanner 10.0.9.15 during nightly window (22:00-02:00)"
+  }
+]

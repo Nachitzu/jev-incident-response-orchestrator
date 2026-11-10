@@ -1,0 +1,17 @@
+[
+  {
+    "severity_hint": "critical",
+    "source_ip": "10.0.2.20",
+    "dest_ip": "193.201.224.9",
+    "user": null,
+    "host": "db02",
+    "observables": [
+      "193.201.224.9"
+    ],
+    "event_id": "exfiltration-01-e1",
+    "timestamp": "2026-07-08T22:47:55Z",
+    "source": "firewall",
+    "event_type": "large_outbound_transfer",
+    "raw_log": "4.2 GB transferred from db02 to 193.201.224.9 over 18 min via HTTPS, outside business hours"
+  }
+]

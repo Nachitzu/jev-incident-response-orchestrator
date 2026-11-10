@@ -1,0 +1,17 @@
+[
+  {
+    "severity_hint": "high",
+    "source_ip": "185.220.101.34",
+    "dest_ip": "10.0.1.12",
+    "user": "admin",
+    "host": "dc01",
+    "observables": [
+      "185.220.101.34"
+    ],
+    "event_id": "brute-force-01-e1",
+    "timestamp": "2026-07-08T03:12:44Z",
+    "source": "EDR",
+    "event_type": "authentication_failure_burst",
+    "raw_log": "47 failed SSH logins for 'admin' in 120s from 185.220.101.34, then 1 successful login"
+  }
+]

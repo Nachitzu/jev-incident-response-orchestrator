@@ -1,0 +1,18 @@
+[
+  {
+    "severity_hint": "low",
+    "source_ip": null,
+    "dest_ip": null,
+    "user": "a.khan",
+    "host": "ws-11",
+    "observables": [
+      "hr-update@corp-benefits-portal.com",
+      "corp-benefits-portal.com"
+    ],
+    "event_id": "phishing-reported-01-e1",
+    "timestamp": "2026-07-08T08:05:00Z",
+    "source": "email_gateway",
+    "event_type": "user_reported_phish",
+    "raw_log": "User reported phishing email from hr-update@corp-benefits-portal.com; user did NOT click any link"
+  }
+]

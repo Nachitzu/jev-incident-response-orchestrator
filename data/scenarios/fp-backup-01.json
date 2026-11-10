@@ -1,0 +1,17 @@
+[
+  {
+    "severity_hint": "low",
+    "source_ip": "10.0.2.5",
+    "dest_ip": "10.0.8.10",
+    "user": null,
+    "host": "fs01",
+    "observables": [
+      "10.0.8.10"
+    ],
+    "event_id": "fp-backup-01-e1",
+    "timestamp": "2026-07-08T02:30:00Z",
+    "source": "firewall",
+    "event_type": "large_outbound_transfer",
+    "raw_log": "Nightly backup job moved 60 GB from fs01 to backup target 10.0.8.10 within 01:00-04:00 window"
+  }
+]
