@@ -221,6 +221,51 @@ class JevEngine:
     # Short alias for callers that describe the operation without the ATT&CK name.
     rerank_techniques = rerank_attack_techniques
 
+    def select_playbook(
+        self,
+        incident_data: dict[str, Any],
+        investigation_data: dict[str, Any],
+        playbooks: dict[str, dict[str, Any]],
+    ) -> str:
+        """Select a bundled playbook with a closed Choice and companion Noul."""
+        if not self._client:
+            raise RuntimeError("JevEngine is not initialized with TYPESAFE_API_KEY")
+        categories = sorted(playbooks)
+        if not categories:
+            raise ValueError("at least one playbook is required")
+        resp = self._client.system_one(
+            state={
+                "incident": incident_data,
+                "investigation": investigation_data,
+                "playbook_categories": categories,
+            },
+            questions={
+                "playbook_fit": Noul(
+                    instructions=(
+                        "Does one of the bundled playbooks clearly apply to this "
+                        "incident and investigation?"
+                    ),
+                    criteria={
+                        "true": "The evidence supports one listed playbook.",
+                        "false": "No listed playbook fits the evidence.",
+                    },
+                ),
+                "playbook": Choice(
+                    instructions="Which bundled playbook best applies?",
+                    criteria={
+                        category: str(
+                            playbooks[category].get("playbook_name", category)
+                        )
+                        for category in categories
+                    },
+                ),
+            },
+        )
+        choice = resp.choices["playbook"].choice
+        if choice not in playbooks or resp.nouls["playbook_fit"].noul < 0.35:
+            return incident_data["category"]
+        return choice
+
     def score_response_steps(
         self,
         incident_data: dict[str, Any],

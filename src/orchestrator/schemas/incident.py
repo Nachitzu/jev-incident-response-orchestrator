@@ -19,6 +19,7 @@ from src.orchestrator.schemas.common import (
     IncidentCategory,
     Observable,
     Severity,
+    SystemOneTelemetry,
     ensure_aware,
 )
 
@@ -33,6 +34,7 @@ class Incident(BaseModel):
     detection_confidence: float = Field(ge=0.0, le=1.0)
     rationale: str = Field(min_length=1)
     observables: list[Observable] = Field(default_factory=list)
+    system_one_telemetry: SystemOneTelemetry | None = None
     status: Literal["detected"] = "detected"
 
     @field_validator("created_at")

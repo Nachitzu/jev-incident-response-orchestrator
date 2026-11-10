@@ -14,6 +14,7 @@ from src.orchestrator.schemas.common import (
     IncidentCategory,
     Observable,
     ObservableType,
+    SystemOneTelemetry,
     Severity,
     ensure_aware,
     is_internal_ip,
@@ -40,6 +41,7 @@ __all__ = [
     "IncidentCategory",
     "ObservableType",
     "Observable",
+    "SystemOneTelemetry",
     "is_internal_ip",
     "ensure_aware",
     # raw event

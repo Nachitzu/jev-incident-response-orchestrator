@@ -6,8 +6,10 @@ import json
 
 import pytest
 
+from src.orchestrator._jev import TriageAssessment
 from src.orchestrator.orchestrator import OrchestratorError, load_events, run_case
 from src.orchestrator.reporting import render_markdown, write_report
+from src.orchestrator.schemas import CaseReport, Incident, SystemOneTelemetry
 from tests.conftest import FakeClient, FakeToolbox
 from tests.test_agents import DROP, ESCALATION, INVESTIGATION, PLAN
 
@@ -29,6 +31,24 @@ SAFE_PLAN = {
 
 def _client(*payloads: dict) -> FakeClient:
     return FakeClient([json.dumps(p) for p in payloads])
+
+
+class _LowConfidenceJev:
+    enabled = True
+
+    def evaluate_raw_event(self, raw_event: dict) -> TriageAssessment:
+        return TriageAssessment(
+            prompt_injection_prob=0.01,
+            is_threat_prob=0.95,
+            category_fits_prob=0.90,
+            category="brute_force",
+            category_confidence=0.61,
+            category_probabilities={"brute_force": 0.61, "other": 0.39},
+            severity_score=2.68,
+            severity_label="high",
+            severity_confidence=0.91,
+            requires_escalation=True,
+        )
 
 
 def test_an_escalated_case_walks_the_full_pipeline(raw_event) -> None:
@@ -58,6 +78,21 @@ def test_a_plan_needing_no_approval_closes_the_case(raw_event) -> None:
         responder_toolbox=FakeToolbox(),
     )
     assert report.final_state == "closed_resolved_suggested"
+
+
+def test_low_jev_confidence_requires_analyst_review(raw_event) -> None:
+    client = _client(ESCALATION, INVESTIGATION, SAFE_PLAN)
+    report = run_case(
+        [raw_event],
+        client=client,
+        jev_engine=_LowConfidenceJev(),
+        investigator_toolbox=FakeToolbox(),
+        responder_toolbox=FakeToolbox(),
+    )
+    assert any(
+        entry.decision == "LOW_CONFIDENCE_DISTRIBUTION_REQUIRES_ANALYST_REVIEW"
+        for entry in report.audit_log
+    )
 
 
 def test_a_dropped_case_is_still_a_recorded_decision(raw_event) -> None:
@@ -130,3 +165,33 @@ def test_the_report_shows_the_plan_and_the_audit_trail(raw_event, tmp_path) -> N
     md_path, json_path = write_report(report, tmp_path)
     assert md_path.exists() and json_path.exists()
     assert json.loads(json_path.read_text(encoding="utf-8"))["incident_id"] == "inc-0001"
+
+
+def test_the_report_shows_system_one_calibrated_telemetry() -> None:
+    incident = Incident(
+        incident_id="inc-telemetry",
+        created_at="2026-07-08T03:13:00Z",
+        triggering_events=["evt-0001"],
+        title="Telemetry test",
+        category="brute_force",
+        severity="HIGH",
+        detection_confidence=0.82,
+        rationale="test",
+        system_one_telemetry=SystemOneTelemetry(
+            prompt_injection_noul=0.01,
+            is_threat_noul=0.95,
+            category_fits_noul=0.90,
+            category_probabilities={"brute_force": 0.61, "other": 0.39},
+            severity_score=2.68,
+            severity_confidence=0.91,
+        ),
+    )
+    report = CaseReport(
+        incident_id="inc-telemetry",
+        incident=incident,
+        final_state="closed_false_positive",
+        generated_at="2026-07-08T03:13:00Z",
+    )
+    markdown = render_markdown(report)
+    assert "System One (Jev) Calibrated Telemetry" in markdown
+    assert "2.68 / 3.00 — Confidence: 0.91" in markdown

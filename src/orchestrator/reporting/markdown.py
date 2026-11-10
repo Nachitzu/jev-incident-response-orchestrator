@@ -32,6 +32,23 @@ def render_markdown(report: CaseReport) -> str:
         lines.append("- **Observables:**")
         lines += [f"  - `{o.type}` {o.value}" for o in inc.observables]
 
+    telemetry = inc.system_one_telemetry
+    if telemetry is not None:
+        lines += [
+            "",
+            "## System One (Jev) Calibrated Telemetry",
+            "",
+            "| Noul | Choice distribution | Score |",
+            "|------|---------------------|-------|",
+            (
+                f"| prompt-injection={_format_probability(telemetry.prompt_injection_noul)}, "
+                f"threat={_format_probability(telemetry.is_threat_noul or telemetry.threat_noul)}, "
+                f"category-fit={_format_probability(telemetry.category_fits_noul)} | "
+                f"{_format_choice_distribution(telemetry.category_probabilities)} | "
+                f"{_format_score(telemetry.severity_score, telemetry.severity_confidence)} |"
+            ),
+        ]
+
     if report.investigation is not None:
         inv = report.investigation
         lines += [
@@ -99,6 +116,26 @@ def render_markdown(report: CaseReport) -> str:
         lines.append("_(empty)_")
     lines.append("")
     return "\n".join(lines)
+
+
+def _format_choice_distribution(probabilities: dict[str, float]) -> str:
+    if not probabilities:
+        return "—"
+    return ", ".join(
+        f"{choice}={probability:.2f}"
+        for choice, probability in sorted(probabilities.items())
+    )
+
+
+def _format_probability(value: float | None) -> str:
+    return f"{value:.2f}" if value is not None else "—"
+
+
+def _format_score(score: float | None, confidence: float | None) -> str:
+    if score is None:
+        return "—"
+    confidence_text = f"{confidence:.2f}" if confidence is not None else "—"
+    return f"{score:.2f} / 3.00 — Confidence: {confidence_text}"
 
 
 def write_report(report: CaseReport, out_dir: str | Path) -> tuple[Path, Path]:

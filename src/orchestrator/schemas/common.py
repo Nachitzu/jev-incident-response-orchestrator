@@ -92,8 +92,11 @@ class Observable(BaseModel):
 class SystemOneTelemetry(BaseModel):
     """Telemetría auditable de las primitivas de Jev (Noul, Choice, Score)."""
     prompt_injection_noul: float | None = Field(default=None, ge=0.0, le=1.0)
+    is_threat_noul: float | None = Field(default=None, ge=0.0, le=1.0)
+    category_fits_noul: float | None = Field(default=None, ge=0.0, le=1.0)
     threat_noul: float | None = Field(default=None, ge=0.0, le=1.0)
     category_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    category_probabilities: dict[str, float] = Field(default_factory=dict)
     severity_score: float | None = Field(default=None, ge=0.0, le=3.0)
     severity_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     grounding_nouls: dict[str, float] = Field(default_factory=dict)

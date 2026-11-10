@@ -15,7 +15,13 @@ from typing import Any
 
 from src.orchestrator import _jev
 from src.orchestrator import _llm
-from src.orchestrator.schemas import DetectionResult, Incident, Observable, RawEvent
+from src.orchestrator.schemas import (
+    DetectionResult,
+    Incident,
+    Observable,
+    RawEvent,
+    SystemOneTelemetry,
+)
 
 AGENT_NAME = "DetectorAgent"
 PROMPT = "detector"
@@ -88,6 +94,17 @@ def _jev_incident(
             for value in (event.source_ip, event.dest_ip)
             if value is not None
         ],
+        system_one_telemetry=SystemOneTelemetry(
+            prompt_injection_noul=assessment.prompt_injection_prob,
+            is_threat_noul=assessment.is_threat_prob,
+            category_fits_noul=assessment.category_fits_prob,
+            threat_noul=assessment.is_threat_prob,
+            category_confidence=assessment.category_confidence,
+            category_probabilities=assessment.category_probabilities,
+            severity_score=assessment.severity_score,
+            severity_confidence=assessment.severity_confidence,
+            escalated_by_cascade=assessment.prompt_injection_prob >= 0.50,
+        ),
     )
 
 
@@ -174,7 +191,7 @@ def detect(
                     "and could not lower severity."
                 )
 
-        return _llm.complete_validated(
+        result = _llm.complete_validated(
             DetectionResult,
             client=client,
             model=model,
@@ -182,6 +199,19 @@ def detect(
             user_content=user_content,
             extra_check=verify_jev_constraints,
         )
+        if result.incident is not None:
+            result.incident.system_one_telemetry = SystemOneTelemetry(
+                prompt_injection_noul=strongest.prompt_injection_prob,
+                is_threat_noul=strongest.is_threat_prob,
+                category_fits_noul=strongest.category_fits_prob,
+                threat_noul=strongest.is_threat_prob,
+                category_confidence=strongest.category_confidence,
+                category_probabilities=strongest.category_probabilities,
+                severity_score=strongest.severity_score,
+                severity_confidence=strongest.severity_confidence,
+                escalated_by_cascade=strongest.prompt_injection_prob >= 0.50,
+            )
+        return result
     if mode == "jev-only":
         raise RuntimeError(
             "SOAR_JEV_MODE=jev-only requires an initialized JevEngine and TYPESAFE_API_KEY"

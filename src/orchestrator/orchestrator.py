@@ -136,6 +136,29 @@ def run_case(
         )
     )
 
+    telemetry = detection.incident.system_one_telemetry if detection.incident else None
+    if telemetry is not None and (
+        (telemetry.severity_confidence is not None
+         and telemetry.severity_confidence < 0.70)
+        or (
+            telemetry.category_confidence is not None
+            and telemetry.category_confidence < 0.70
+        )
+    ):
+        audit.append(
+            AuditEntry(
+                timestamp=now(),
+                stage="orchestration",
+                agent="Orchestrator",
+                decision="LOW_CONFIDENCE_DISTRIBUTION_REQUIRES_ANALYST_REVIEW",
+                inputs_digest=(
+                    f"incident {detection.incident.incident_id}; "
+                    f"category_confidence={telemetry.category_confidence!r}, "
+                    f"severity_confidence={telemetry.severity_confidence!r}"
+                ),
+            )
+        )
+
     if not detection.escalate:
         incident = _dropped_incident(
             events,
@@ -203,6 +226,7 @@ def run_case(
             client=client,
             model=responder_model,
             toolbox=resp_toolbox,
+            jev_engine=jev_engine,
         )
     except _llm.LLMError as exc:
         raise OrchestratorError(f"response planning failed: {exc}") from exc
