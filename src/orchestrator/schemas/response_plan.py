@@ -16,7 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from src.orchestrator.schemas.common import ensure_aware
+from orchestrator.schemas.common import ensure_aware
 
 Phase = Literal["containment", "eradication", "recovery"]
 
@@ -56,7 +56,7 @@ class PlaybookStep(BaseModel):
         return any(marker in lowered for marker in DESTRUCTIVE_MARKERS)
 
     @model_validator(mode="after")
-    def _enforce_hitl(self) -> "PlaybookStep":
+    def _enforce_hitl(self) -> PlaybookStep:
         if (
             self.blast_radius_score is not None
             and self.blast_radius_score >= 1.5
@@ -85,10 +85,10 @@ class ResponsePlan(BaseModel):
     @field_validator("planned_at")
     @classmethod
     def _ensure_aware(cls, value: datetime) -> datetime:
-        return ensure_aware(value)
+        return ensure_aware(value) or value
 
     @model_validator(mode="after")
-    def _approval_flag_matches_steps(self) -> "ResponsePlan":
+    def _approval_flag_matches_steps(self) -> ResponsePlan:
         expected = any(step.requires_approval for step in self.steps)
         if self.requires_human_approval != expected:
             raise ValueError(

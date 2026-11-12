@@ -1,221 +1,319 @@
-"""The three agents, driven by scripted model replies. Nothing reaches the network."""
+"""Agent behaviour under the System One / System Two contract (offline doubles)."""
 
 from __future__ import annotations
 
-import json
-
 import pytest
+from conftest import FakeJev, FakeStructuredLLM, FakeTriage
 
-from src.orchestrator import _llm
-from src.orchestrator.agents import detect, investigate, respond
-from src.orchestrator.schemas import Incident, Investigation, RawEvent
-from tests.conftest import FakeClient, FakeToolbox, text_block, tool_use_block
+from orchestrator._llm import MODEL_HAIKU, MODEL_SONNET
+from orchestrator.agents import DetectorAgent, InvestigatorAgent, ResponderAgent
+from orchestrator.schemas import (
+    Incident,
+    IncidentCategory,
+    Investigation,
+    MitreTechnique,
+    ResponsePlan,
+    Severity,
+)
 
-ESCALATION = {
-    "escalate": True,
-    "incident": {
-        "incident_id": "inc-0001",
-        "created_at": "2026-07-08T03:13:00Z",
-        "triggering_events": ["evt-0001"],
-        "title": "Probable SSH brute-force compromise of a domain controller",
-        "category": "brute_force",
-        "severity": "HIGH",
-        "detection_confidence": 0.82,
-        "rationale": "47 failed logins then a success against dc01",
-        "observables": [{"type": "ip", "value": "185.220.101.34"}],
-        "status": "detected",
-    },
-    "drop_reason": None,
-}
-
-DROP = {
-    "escalate": False,
-    "incident": None,
-    "drop_reason": "Scheduled backup job from an authorized internal host.",
-}
-
-INVESTIGATION = {
-    "incident_id": "inc-0001",
-    "investigated_at": "2026-07-08T03:20:00Z",
-    "mitre_techniques": [
-        {
-            "technique_id": "T1110.001",
-            "name": "Password Guessing",
-            "tactic": "Credential Access",
-        }
-    ],
-    "enriched_observables": [
-        {
-            "observable": {"type": "ip", "value": "185.220.101.34"},
-            "reputation": "malicious",
-            "source": "local_intel",
-        }
-    ],
-    "hypothesis": "External actor brute-forced SSH and obtained an admin session.",
-    "confidence": 0.78,
-    "kill_chain_stage": "exploitation",
-    "evidence": ["47 failed logins then success", "source ip is a known tor exit"],
-    "recommended_severity": "CRITICAL",
-}
-
-PLAN = {
-    "incident_id": "inc-0001",
-    "planned_at": "2026-07-08T03:25:00Z",
-    "playbook_name": "Brute-force response (NIST 800-61)",
-    "summary": "Contain dc01, rotate the admin credential, then restore access.",
-    "steps": [
-        {
-            "order": 1,
-            "phase": "containment",
-            "action": "Open a Tier 2 ticket and notify the on-call analyst",
-            "requires_approval": False,
-            "automatable": True,
-            "justification": "Non-destructive coordination",
-        },
-        {
-            "order": 2,
-            "phase": "containment",
-            "action": "Isolate host dc01 from the network",
-            "requires_approval": True,
-            "automatable": False,
-            "justification": "Isolating a domain controller is disruptive",
-        },
-    ],
-    "requires_human_approval": True,
-    "residual_risk": "Lateral movement may predate containment.",
-}
+UTC_HINT = None  # timestamps come from the fixture; none pinned here.
 
 
 # --------------------------------------------------------------------------
-# detector
+# DetectorAgent
 # --------------------------------------------------------------------------
-def test_the_detector_escalates_and_keeps_the_incident(raw_event: RawEvent) -> None:
-    client = FakeClient([json.dumps(ESCALATION)])
-    result = detect([raw_event], client=client)
-    assert result.escalate is True
-    assert result.incident is not None
-    assert result.incident.category == "brute_force"
+def test_detector_llm_only_path(incident, raw_event):
+    """Without Jev the detector is a plain structured-LLM call plus audit."""
+    llm = FakeStructuredLLM([incident])
+    result, audit = DetectorAgent(llm_client=llm).run(raw_event)
+    assert result.incident_id == "inc-0001"
+    assert [c["model"] for c in llm.calls] == [MODEL_HAIKU]
+    assert "<untrusted_event>" in llm.calls[0]["user_prompt"]
+    stages = [entry.stage for entry in audit]
+    assert stages == ["detect:completed"]
 
 
-def test_the_detector_wraps_events_as_data_not_instructions(raw_event: RawEvent) -> None:
-    client = FakeClient([json.dumps(DROP)])
-    detect([raw_event], client=client)
-    sent = client.calls[0]["messages"][0]["content"]
-    assert "<events>" in sent and "</events>" in sent
-
-
-def test_the_detector_runs_on_the_cheap_model_by_default(raw_event: RawEvent) -> None:
-    client = FakeClient([json.dumps(DROP)])
-    detect([raw_event], client=client)
-    assert client.calls[0]["model"] == _llm.DETECTOR_MODEL
-
-
-def test_a_drop_always_carries_a_reason(raw_event: RawEvent) -> None:
-    client = FakeClient([json.dumps(DROP)])
-    result = detect([raw_event], client=client)
+def test_detector_short_circuits_clear_false_positive(raw_event):
+    """A benign System One verdict must not cost a token."""
+    jev = FakeJev(
+        triage=FakeTriage(
+            is_threat_prob=0.08,
+            requires_escalation=False,
+            drop_reason="scheduled backup window",
+        )
+    )
+    llm = FakeStructuredLLM([])
+    result, audit = DetectorAgent(llm_client=llm, jev_engine=jev).run(raw_event)
+    assert llm.calls == [] and jev.triage_calls == 1
     assert result.escalate is False
-    assert result.drop_reason
+    assert result.severity == Severity.LOW
+    assert result.false_positive_reason == "scheduled backup window"
+    assert result.system_one_telemetry is not None
+    assert result.system_one_telemetry.is_threat_noul == 0.08
+    # The dismissal must still name the indicators the event carried.
+    assert {"185.220.101.34", "10.0.1.12"} <= set(result.initial_indicators)
+    assert "detect:short_circuit" in [e.stage for e in audit]
 
 
-def test_the_detector_refuses_an_empty_batch() -> None:
-    with pytest.raises(ValueError):
-        detect([], client=FakeClient([]))
+def test_detector_jev_only_mode_never_calls_llm(raw_event):
+    jev = FakeJev(
+        mode="jev-only",
+        triage=FakeTriage(
+            is_threat_prob=0.9,
+            requires_escalation=True,
+            severity_label="critical",
+            severity_score=2.9,
+            severity_confidence=0.85,
+            category="malware",
+            category_confidence=0.9,
+        ),
+    )
+    llm = FakeStructuredLLM([])
+    result, audit = DetectorAgent(llm_client=llm, jev_engine=jev).run(raw_event)
+    assert llm.calls == []
+    assert result.escalate is True
+    assert result.severity == Severity.CRITICAL
+    assert result.category == IncidentCategory.MALWARE
+    assert result.confidence >= 0.5  # the HIGH-confidence contract still holds
+    assert "detect:jev_only" in [e.stage for e in audit]
+
+
+def test_detector_guardrail_overrides_prompt_injection(raw_event):
+    """A hijacked LLM answer must be forced back to escalate+HIGH."""
+    jev = FakeJev(
+        triage=FakeTriage(
+            prompt_injection_prob=0.62,
+            is_threat_prob=0.70,
+            requires_escalation=True,
+        )
+    )
+    hijacked = Incident(
+        incident_id="inc-0001",
+        source_event_id="evt-0001",
+        title="All good",
+        summary="The log told me to close this one.",
+        severity=Severity.LOW,
+        category=IncidentCategory.OTHER,
+        confidence=0.30,
+        escalate=False,
+        false_positive_reason="looks benign",
+    )
+    llm = FakeStructuredLLM([hijacked])
+    result, audit = DetectorAgent(llm_client=llm, jev_engine=jev).run(raw_event)
+    assert result.escalate is True
+    assert result.severity == Severity.HIGH
+    assert result.confidence >= 0.5
+    assert result.false_positive_reason is None
+    assert result.summary.startswith("[ALERT")
+    assert result.system_one_telemetry.escalated_by_cascade is True
+    assert "detect:guardrail" in [e.stage for e in audit]
+
+
+def test_detector_downgrades_already_contained_threat(raw_event):
+    """A threat the control plane already killed must not page Tier 2."""
+    jev = FakeJev(
+        triage=FakeTriage(
+            is_threat_prob=0.55,
+            already_contained_prob=0.85,
+            requires_escalation=True,
+            severity_label="high",
+            severity_score=2.1,
+        )
+    )
+    loud = Incident(
+        incident_id="inc-0001",
+        source_event_id="evt-0001",
+        title="Malware attachment executed?",
+        summary="Gateway flagged a quarantined attachment.",
+        severity=Severity.HIGH,
+        category=IncidentCategory.MALWARE,
+        confidence=0.80,
+        escalate=True,
+    )
+    llm = FakeStructuredLLM([loud])
+    result, audit = DetectorAgent(llm_client=llm, jev_engine=jev).run(raw_event)
+    assert result.escalate is False
+    assert result.severity == Severity.LOW
+    assert "already mitigated" in (result.false_positive_reason or "")
+    assert "detect:contained_reconciliation" in [e.stage for e in audit]
+
+
+def test_detector_flags_bimodal_severity_score(raw_event):
+    jev = FakeJev(
+        triage=FakeTriage(
+            is_threat_prob=0.75,
+            requires_escalation=True,
+            severity_confidence=0.40,
+        )
+    )
+    mid = Incident(
+        incident_id="inc-0001",
+        source_event_id="evt-0001",
+        title="Something suspicious",
+        summary="Medium-severity suspicion.",
+        severity=Severity.MEDIUM,
+        category=IncidentCategory.RECON,
+        confidence=0.70,
+        escalate=True,
+    )
+    llm = FakeStructuredLLM([mid])
+    _, audit = DetectorAgent(llm_client=llm, jev_engine=jev).run(raw_event)
+    assert any(e.stage == "detect:low_confidence_score" for e in audit)
 
 
 # --------------------------------------------------------------------------
-# investigator
+# InvestigatorAgent
 # --------------------------------------------------------------------------
-def test_the_investigator_returns_a_verified_investigation(incident: Incident) -> None:
-    client = FakeClient([json.dumps(INVESTIGATION)])
-    result = investigate(incident, client=client, toolbox=FakeToolbox())
-    assert result.incident_id == incident.incident_id
-    assert result.mitre_techniques[0].technique_id == "T1110.001"
+def test_investigator_enriches_iocs_before_the_llm(incident, raw_event):
+    """Deterministic enrichment must reach the final contract even if Haiku omits it."""
+    draft = Investigation(
+        incident_id="inc-0001",
+        hypothesis="External SSH brute force.",
+        recommended_severity=Severity.HIGH,
+    )
+    jev = FakeJev()
+    llm = FakeStructuredLLM([draft])
+    result, audit = InvestigatorAgent(llm_client=llm, jev_engine=jev).run(
+        incident, raw_event
+    )
+    assert [c["model"] for c in llm.calls] == [MODEL_HAIKU]  # grounding passed
+    assert jev.verify_calls == 1 and jev.rank_calls == 1
+    indicators = {ioc.indicator for ioc in result.enriched_iocs}
+    assert {"185.220.101.34", "10.0.1.12"} <= indicators
+    assert all(ioc.reputation for ioc in result.enriched_iocs)
+    stages = [e.stage for e in audit]
+    assert "investigate:intel_enrichment" in stages
+    assert "investigate:jev_grounding_check" in stages
+    assert "investigate:sde_cascade_escalated" not in stages
 
 
-def test_an_unverifiable_attack_technique_is_sent_back(incident: Incident) -> None:
-    hallucinated = {
-        **INVESTIGATION,
-        "mitre_techniques": [
-            {"technique_id": "T9999", "name": "Invented", "tactic": "Nonsense"}
+def test_investigator_escalates_to_sonnet_on_failed_grounding(incident, raw_event):
+    draft1 = Investigation(
+        incident_id="inc-0001",
+        hypothesis="Guess.",
+        recommended_severity=Severity.MEDIUM,
+    )
+    draft2 = Investigation(
+        incident_id="inc-0001",
+        hypothesis="Grounded external brute force.",
+        attack_chain_summary="Initial access via guessed SSH creds.",
+        recommended_severity=Severity.HIGH,
+        confidence=0.82,
+    )
+    jev = FakeJev(
+        grounding_checks={"grounded_in_iocs": 0.42, "mitre_coherent": 0.80}
+    )
+    llm = FakeStructuredLLM([draft1, draft2])
+    result, audit = InvestigatorAgent(llm_client=llm, jev_engine=jev).run(
+        incident, raw_event
+    )
+    assert [c["model"] for c in llm.calls] == [MODEL_HAIKU, MODEL_SONNET]
+    assert "grounded_in_iocs" in llm.calls[1]["user_prompt"]
+    assert result.hypothesis == "Grounded external brute force."
+    assert "investigate:sde_cascade_escalated" in [e.stage for e in audit]
+
+
+def test_investigator_rejects_techniques_outside_the_catalog(incident, raw_event):
+    """The anti-hallucination guard: invented T-numbers never pass the validator."""
+    fabricated = Investigation(
+        incident_id="inc-0001",
+        hypothesis="Creative but wrong.",
+        mitre_techniques=[
+            MitreTechnique(
+                technique_id="T9999",
+                name="Psychic intrusion",
+                tactic="Command and Control",
+            )
         ],
-    }
-    client = FakeClient([json.dumps(hallucinated), json.dumps(INVESTIGATION)])
-    result = investigate(incident, client=client, toolbox=FakeToolbox())
-    assert [t.technique_id for t in result.mitre_techniques] == ["T1110.001"]
-    correction = " ".join(
-        m["content"]
-        for m in client.calls[1]["messages"]
-        if isinstance(m["content"], str)
+        recommended_severity=Severity.HIGH,
     )
-    assert "T9999" in correction and "not in the ATT&CK catalog" in correction
-
-
-def test_an_investigation_for_the_wrong_incident_is_rejected(incident: Incident) -> None:
-    wrong = {**INVESTIGATION, "incident_id": "inc-9999"}
-    client = FakeClient([json.dumps(wrong)] * 3)
-    with pytest.raises(_llm.LLMError):
-        investigate(incident, client=client, toolbox=FakeToolbox())
-
-
-def test_the_investigator_can_use_its_tools(incident: Incident) -> None:
-    toolbox = FakeToolbox({"lookup_reputation": {"reputation": "malicious"}})
-    client = FakeClient(
-        [
-            [tool_use_block("lookup_reputation", {"indicator": "185.220.101.34"})],
-            [text_block(json.dumps(INVESTIGATION))],
-        ]
-    )
-    investigate(incident, client=client, toolbox=toolbox)
-    assert toolbox.calls[0][0] == "lookup_reputation"
+    llm = FakeStructuredLLM([fabricated])
+    with pytest.raises(ValueError, match="T9999"):
+        InvestigatorAgent(llm_client=llm, jev_engine=FakeJev()).run(incident, raw_event)
 
 
 # --------------------------------------------------------------------------
-# responder
+# ResponderAgent
 # --------------------------------------------------------------------------
-def test_the_responder_produces_a_human_gated_plan(
-    incident: Incident, investigation: Investigation
-) -> None:
-    client = FakeClient([json.dumps(PLAN)])
-    plan = respond(incident, investigation, client=client, toolbox=FakeToolbox())
+def test_responder_refuses_a_foreign_investigation(incident, investigation):
+    other = incident.model_copy(update={"incident_id": "inc-9999"})
+    llm = FakeStructuredLLM([])
+    with pytest.raises(ValueError, match="different incident"):
+        ResponderAgent(llm_client=llm).run(other, investigation)
+    assert llm.calls == []
+
+
+def test_responder_draft_path_without_jev(incident, investigation, response_plan):
+    llm = FakeStructuredLLM([response_plan])
+    jev = FakeJev(enabled=False)
+    plan, audit = ResponderAgent(llm_client=llm, jev_engine=jev).run(
+        incident, investigation
+    )
+    assert plan.incident_id == "inc-0001"
+    assert jev.score_calls == 0 and jev.playbook_calls == 0
+    assert [c["model"] for c in llm.calls] == [MODEL_SONNET]
+    stages = [e.stage for e in audit]
+    assert "respond:draft" in stages and "respond:completed" in stages
+    assert "respond:jev_hitl_gate" not in stages
+
+
+def test_responder_forces_approval_from_jev_scores(incident, investigation, safe_step):
+    """A safe-looking step Jev distrusts gets pulled under human approval."""
+    auto_plan = ResponsePlan(
+        incident_id="inc-0001",
+        planned_at="2026-07-08T03:25:00+00:00",
+        playbook_name="brute_force",
+        summary="Automate the low-risk notification.",
+        steps=[safe_step],
+        requires_human_approval=False,
+        residual_risk="Minor: notification only.",
+    )
+    jev = FakeJev(step_scores=[(0.9, 0.1, 0.8)])
+    llm = FakeStructuredLLM([auto_plan])
+    plan, audit = ResponderAgent(llm_client=llm, jev_engine=jev).run(
+        incident, investigation
+    )
+    step = plan.steps[0]
+    assert step.hitl_noul == 0.9
+    assert step.requires_approval is True
+    assert step.automatable is False
     assert plan.requires_human_approval is True
-    assert any(step.requires_approval for step in plan.steps)
+    assert "respond:jev_hitl_gate" in [e.stage for e in audit]
 
 
-def test_the_responder_is_handed_the_base_playbook(
-    incident: Incident, investigation: Investigation
-) -> None:
-    client = FakeClient([json.dumps(PLAN)])
-    respond(incident, investigation, client=client, toolbox=FakeToolbox())
-    sent = client.calls[0]["messages"][0]["content"]
-    assert "<base_playbook>" in sent
-    assert "Brute-force" in sent or "brute_force" in sent
+def test_responder_honours_jev_playbook_choice(incident, investigation, response_plan):
+    jev = FakeJev(playbook_choice="phishing")
+    llm = FakeStructuredLLM([response_plan])
+    _, audit = ResponderAgent(llm_client=llm, jev_engine=jev).run(
+        incident, investigation
+    )
+    playbook_entries = [
+        e for e in audit if e.stage == "respond:jev_playbook"
+    ]
+    assert playbook_entries and "phishing" in playbook_entries[0].details
 
 
-def test_a_plan_that_hides_a_destructive_step_never_validates(
-    incident: Incident, investigation: Investigation
-) -> None:
-    unsafe = {
-        **PLAN,
-        "steps": [
-            {
-                "order": 1,
-                "phase": "containment",
-                "action": "Isolate host dc01 from the network",
-                "requires_approval": False,
-                "automatable": True,
-                "justification": "Fast containment",
-            }
+def test_responder_validator_catches_a_drifted_incident_id(incident, investigation):
+    """The responder must never sign a plan for a different case."""
+    from orchestrator.schemas import PlaybookStep
+
+    plan = ResponsePlan(
+        incident_id="inc-9999",
+        planned_at="2026-07-08T03:25:00+00:00",
+        playbook_name="brute_force",
+        summary="Wrong case.",
+        steps=[
+            PlaybookStep(
+                order=1,
+                phase="containment",
+                action="Notify the analyst",
+                requires_approval=False,
+                justification="Safe step.",
+            )
         ],
-        "requires_human_approval": False,
-    }
-    client = FakeClient([json.dumps(unsafe)] * 3)
-    with pytest.raises(_llm.LLMError):
-        respond(incident, investigation, client=client, toolbox=FakeToolbox())
-
-
-def test_mismatched_inputs_are_caught_before_any_api_call(incident: Incident) -> None:
-    foreign = Investigation.model_validate({**INVESTIGATION, "incident_id": "inc-9999"})
-    client = FakeClient([])
-    with pytest.raises(ValueError):
-        respond(incident, foreign, client=client, toolbox=FakeToolbox())
-    assert client.calls == []
+        requires_human_approval=False,
+        residual_risk="None.",
+    )
+    llm = FakeStructuredLLM([plan])
+    with pytest.raises(ValueError, match="inc-0001"):
+        ResponderAgent(llm_client=llm).run(incident, investigation)

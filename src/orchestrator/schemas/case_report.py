@@ -1,11 +1,10 @@
 """Orchestrator output: the full auditable case file.
 
 A `CaseReport` bundles the incident, the investigation and the response plan
-together with the `AuditLog` — the ordered record of every decision each agent
-made and the model that made it. This is the interpretability requirement from the
-project brief: an analyst must be able to reconstruct *why* the system reached each
-conclusion, not just what it concluded. The report serializes to JSON and renders
-to Markdown (Phases 3–4).
+together with the audit log — the ordered record of every decision each agent
+made and who made it. This is the interpretability requirement from the project
+brief: an analyst must be able to reconstruct *why* the system reached each
+conclusion, not just what it concluded.
 """
 
 from __future__ import annotations
@@ -15,12 +14,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from src.orchestrator.schemas.common import ensure_aware
-from src.orchestrator.schemas.incident import Incident
-from src.orchestrator.schemas.investigation import Investigation
-from src.orchestrator.schemas.response_plan import ResponsePlan
-
-Stage = Literal["detection", "investigation", "response", "orchestration"]
+from orchestrator.schemas.common import AuditEntry, ensure_aware
+from orchestrator.schemas.incident import Incident
+from orchestrator.schemas.investigation import Investigation
+from orchestrator.schemas.response_plan import ResponsePlan
 
 FinalState = Literal[
     "closed_false_positive",
@@ -28,19 +25,7 @@ FinalState = Literal[
     "escalated_to_human",
 ]
 
-
-class AuditEntry(BaseModel):
-    timestamp: datetime
-    stage: Stage
-    agent: str = Field(min_length=1)
-    model: str | None = None
-    decision: str = Field(min_length=1)
-    inputs_digest: str = Field(min_length=1)
-
-    @field_validator("timestamp")
-    @classmethod
-    def _ensure_aware(cls, value: datetime) -> datetime:
-        return ensure_aware(value)
+__all__ = ["AuditEntry", "CaseReport", "FinalState"]
 
 
 class CaseReport(BaseModel):
@@ -55,15 +40,20 @@ class CaseReport(BaseModel):
     @field_validator("generated_at")
     @classmethod
     def _ensure_aware(cls, value: datetime) -> datetime:
-        return ensure_aware(value)
+        return ensure_aware(value) or value
 
     @model_validator(mode="after")
-    def _state_consistency(self) -> "CaseReport":
-        # A false positive never advanced past detection.
+    def _state_consistency(self) -> CaseReport:
+        # A false positive never advanced past detection, and a case the
+        # detector dismissed cannot claim it escalated.
         if self.final_state == "closed_false_positive":
             if self.investigation is not None or self.response_plan is not None:
                 raise ValueError(
                     "closed_false_positive cannot carry an investigation or plan"
+                )
+            if self.incident.escalate:
+                raise ValueError(
+                    "closed_false_positive requires incident.escalate=False"
                 )
         elif self.investigation is None:
             raise ValueError(

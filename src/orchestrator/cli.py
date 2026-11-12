@@ -2,8 +2,7 @@
 
 Runs a scenario through detect -> investigate -> respond and writes the case
 report. This is the mode that needs `ANTHROPIC_API_KEY`; if you would rather not
-use one, the same pipeline runs inside Claude Code via `/soar-run` (see the
-README), with `soar-tool` doing the deterministic half.
+use one, the deterministic half still runs offline through `soar-tool`.
 
     soar-orchestrator run data/scenarios/phishing-01.json
     soar-orchestrator scenarios
@@ -17,17 +16,17 @@ import os
 import sys
 from pathlib import Path
 
-from src.orchestrator import _llm
-from src.orchestrator.orchestrator import OrchestratorError, load_events, run_case
-from src.orchestrator.reporting import write_report
-from src.orchestrator.tools import intel
+from orchestrator._llm import StructuredLLMClient
+from orchestrator.orchestrator import OrchestratorError, load_events, run_case
+from orchestrator.reporting import write_report
+from orchestrator.tools import intel
 
 EXIT_OK = 0
 EXIT_FAILED = 1
 
 
-def _build_client():
-    """Create an Anthropic client, or explain precisely what is missing.
+def _build_client() -> StructuredLLMClient:
+    """Create a structured LLM client, or explain precisely what is missing.
 
     Kept out of the agents on purpose: they take a client, they never make one,
     which is what lets every test run offline.
@@ -35,32 +34,33 @@ def _build_client():
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit(
             "ANTHROPIC_API_KEY is not set.\n"
-            "Either export it (see .env.example), or run the pipeline without a key "
-            "from a Claude Code session:\n"
-            "    /soar-run data/scenarios/phishing-01.json"
+            "Either export it (see .env.example), or run the deterministic half "
+            "without a key:\n"
+            "    soar-tool validate --schema incident --in incident.json"
         )
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:  # pragma: no cover - dependency is declared
-        raise SystemExit(f"the anthropic SDK is not installed: {exc}") from exc
-    return Anthropic()
+    return StructuredLLMClient()
 
 
 def _summarize(report) -> str:
     lines = [
         f"case {report.incident_id}: {report.final_state}",
         f"  incident   : {report.incident.title}",
-        f"  category   : {report.incident.category} / {report.incident.severity} "
-        f"(confidence {report.incident.detection_confidence:.2f})",
+        (
+            f"  category   : {report.incident.category} / {report.incident.severity} "
+            f"(confidence {report.incident.confidence:.2f})"
+        ),
     ]
+    if report.incident.false_positive_reason:
+        lines.append(f"  dismissed  : {report.incident.false_positive_reason}")
     if report.investigation is not None:
         techniques = ", ".join(
             t.technique_id for t in report.investigation.mitre_techniques
         )
         lines.append(f"  ATT&CK     : {techniques or '(none verified)'}")
-        lines.append(f"  kill chain : {report.investigation.kill_chain_stage}")
     if report.response_plan is not None:
-        approvals = sum(1 for s in report.response_plan.steps if s.requires_approval)
+        approvals = sum(
+            1 for s in report.response_plan.steps if s.requires_approval
+        )
         lines.append(
             f"  plan       : {len(report.response_plan.steps)} step(s), "
             f"{approvals} needing human approval"
@@ -83,11 +83,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         report = run_case(
             events,
-            client=client,
+            llm_client=client,
             incident_id=scenario.stem,
-            detector_model=args.detector_model,
-            investigator_model=args.investigator_model,
-            responder_model=args.responder_model,
         )
     except OrchestratorError as exc:
         print(exc, file=sys.stderr)
@@ -105,7 +102,11 @@ def cmd_scenarios(args: argparse.Namespace) -> int:
     for path in sorted(directory.glob("*.json")):
         if path.name == "labels.json":
             continue
-        events = load_events(path)
+        try:
+            events = load_events(path)
+        except OrchestratorError as exc:
+            print(f"{path.stem:<26} INVALID: {exc}", file=sys.stderr)
+            continue
         print(f"{path.stem:<26} {len(events):>2} event(s)  {events[0].source}")
     return EXIT_OK
 
@@ -129,17 +130,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    default_model = os.environ.get("SOAR_MODEL")
-
     p_run = sub.add_parser("run", help="run one scenario end to end")
     p_run.add_argument("scenario", help="path to a scenario JSON file (RawEvent[])")
     p_run.add_argument("--out", default="reports", help="report directory")
-    p_run.add_argument("--detector-model", default=default_model or _llm.DETECTOR_MODEL)
     p_run.add_argument(
-        "--investigator-model", default=default_model or _llm.INVESTIGATOR_MODEL
-    )
-    p_run.add_argument(
-        "--responder-model", default=default_model or _llm.RESPONDER_MODEL
+        "--model",
+        default=None,
+        help="override the model for every agent (default: haiku detector, "
+        "sonnet investigator/responder)",
     )
     p_run.add_argument(
         "--no-report", action="store_true", help="print the summary but write no files"

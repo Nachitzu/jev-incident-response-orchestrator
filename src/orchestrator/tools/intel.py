@@ -1,14 +1,14 @@
 """Offline-first threat intelligence, ATT&CK and playbook lookups.
 
-These are plain functions over the bundled JSON under `data/`. They are the
-single implementation used by both run modes: `toolcli.py` exposes them as
-`soar-tool` subcommands for the Claude Code console mode, and `toolbox.py` wraps
-them as Anthropic tool definitions for API mode.
+These are plain functions over the bundled JSON under `data/`, wrapped in the
+`ThreatIntelLookup` facade the agents consume. `toolcli.py` exposes the same
+functions as `soar-tool` subcommands, and `toolbox.py` wraps them as Anthropic
+tool definitions for console/API tool loops.
 
 Offline-first is a design commitment, not a limitation: the demo must be
-reproducible on a laptop with no keys. `lookup_reputation()` accepts an optional
-`live` callable so a real API (AbuseIPDB and friends) can be injected later
-without any of the callers changing.
+reproducible on a laptop with no keys. Live lookups (AbuseIPDB) are consulted
+only for indicators the local set does not know, and only when
+`ABUSEIPDB_API_KEY` is set.
 """
 
 from __future__ import annotations
@@ -16,25 +16,36 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+
+from orchestrator.schemas.common import guess_indicator_type
+from orchestrator.schemas.investigation import EnrichedIOC
+from orchestrator.schemas.raw_event import RawEvent
 
 # What a reputation lookup returns when the indicator is not in local intel.
 UNKNOWN_REPUTATION = "unknown"
 
 
 def data_dir() -> Path:
-    """Locate the repo's `data/` directory.
+    """Locate the intel data directory.
 
-    Resolved from this file so the lookups work from any CWD; `SOAR_DATA_DIR`
-    overrides it (used by tests and by anyone pointing the demo at their own
-    intel set).
+    `SOAR_DATA_DIR` overrides everything. Otherwise prefer the copy installed
+    next to the package (pip installs force-include `data/` inside
+    `orchestrator/`), then the repository checkout for source-tree runs.
     """
     override = os.environ.get("SOAR_DATA_DIR")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[3] / "data"
+    this = Path(__file__).resolve()
+    pkg_root = this.parents[1]        # .../orchestrator
+    repo_root = this.parents[3]      # source checkout root
+    for candidate in (pkg_root / "data", repo_root / "data"):
+        if candidate.exists():
+            return candidate
+    return repo_root / "data"
 
 
 def _load(*parts: str) -> Any:
@@ -76,8 +87,8 @@ def lookup_reputation(
     """Return what is known about one indicator.
 
     An indicator missing from local intel is reported as `unknown` rather than
-    as an error: "we have no data" is a legitimate investigative finding, and an
-    agent that sees an exception here would be tempted to invent one.
+    as an error: "we have no data" is a legitimate investigative finding, and
+    an agent that sees an exception here would be tempted to invent one.
     """
     entry = _reputation_db().get(indicator)
     if entry is None and live is not None:
@@ -179,3 +190,109 @@ def get_playbook(category: str) -> dict[str, Any] | None:
 
 def playbook_categories() -> list[str]:
     return sorted(_playbook_db())
+
+
+# --------------------------------------------------------------------------
+# agent-facing facade
+# --------------------------------------------------------------------------
+def _abuseipdb_live_from_env() -> Callable[[str], dict[str, Any] | None] | None:
+    """Build a live AbuseIPDB lookup when ABUSEIPDB_API_KEY is set, else None."""
+    api_key = os.environ.get("ABUSEIPDB_API_KEY")
+    if not api_key:
+        return None
+
+    def live(indicator: str) -> dict[str, Any] | None:
+        import httpx
+
+        try:
+            response = httpx.get(
+                "https://api.abuseipdb.com/api/v2/check",
+                params={"ipAddress": indicator, "maxAgeInDays": 90},
+                headers={"Key": api_key, "Accept": "application/json"},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            data = response.json().get("data") or {}
+        except Exception:  # noqa: BLE001
+            # A live feed that is down must degrade to "unknown", never break triage.
+            return None
+        score = float(data.get("abuseConfidenceScore") or 0)
+        if score >= 75:
+            reputation = "malicious"
+        elif score >= 25:
+            reputation = "suspicious"
+        else:
+            reputation = "benign"
+        return {
+            "type": "ip",
+            "reputation": reputation,
+            "source": "abuseipdb",
+            "detail": data,
+        }
+
+    return live
+
+
+class ThreatIntelLookup:
+    """Object facade over the offline intel set used by the agents.
+
+    `live` is consulted only for indicators the local set does not know; by
+    default it is an AbuseIPDB lookup when ABUSEIPDB_API_KEY is set, and None
+    (fully offline) otherwise.
+    """
+
+    def __init__(
+        self,
+        *,
+        live: Callable[[str], dict[str, Any] | None] | None = None,
+    ) -> None:
+        self._live = live if live is not None else _abuseipdb_live_from_env()
+
+    @property
+    def mitre_catalog_by_id(self) -> dict[str, dict[str, Any]]:
+        return {t["technique_id"]: dict(t) for t in _attack_catalog()}
+
+    def lookup(
+        self, indicator: str, type_hint: str | None = None
+    ) -> dict[str, Any]:
+        return lookup_reputation(indicator, type_hint, live=self._live)
+
+    def get_mitre_candidates_for_category(
+        self, category: str, *, limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """Lexical candidate techniques for an incident category."""
+        return rank_techniques({"category": category}, [], limit=limit)
+
+    def enrich_event_indicators(
+        self,
+        *,
+        raw_event: RawEvent,
+        initial_indicators: list[str] | None = None,
+    ) -> list[EnrichedIOC]:
+        """Enrich the incident's seed indicators plus everything the event names.
+
+        Order is preserved and duplicates collapsed: agent-provided indicators
+        first (they carry the detector's intent), then the event's own
+        observables and endpoints.
+        """
+        indicators: list[str] = []
+        for value in list(initial_indicators or []) + list(raw_event.observables):
+            if value and value not in indicators:
+                indicators.append(value)
+        for value in (raw_event.source_ip, raw_event.destination_ip):
+            if value and value not in indicators:
+                indicators.append(value)
+
+        enriched: list[EnrichedIOC] = []
+        for value in indicators:
+            entry = self.lookup(value)
+            enriched.append(
+                EnrichedIOC(
+                    indicator=value,
+                    type=guess_indicator_type(value),
+                    reputation=entry.get("reputation", UNKNOWN_REPUTATION),
+                    source=entry.get("source", "local_intel"),
+                    detail=entry.get("detail"),
+                )
+            )
+        return enriched

@@ -1,168 +1,264 @@
-"""Investigator: an incident in, an evidence-backed investigation out.
-
-This is the stage that can hallucinate most expensively — an invented ATT&CK
-technique looks exactly like a real one in a report — so verification is not left
-to the prompt. Every `technique_id` the model returns is checked against the
-local catalog inside the retry loop, and an unverified id sends the answer back
-with the reason attached.
-"""
-
+"""Stage 2 — InvestigatorAgent with SDE Cascade (Haiku 4.5 -> Jev Noul Audit -> Sonnet 5)."""
 from __future__ import annotations
 
 import json
-from typing import Any
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Protocol
 
-from src.orchestrator import _jev
-from src.orchestrator import _llm
-from src.orchestrator.schemas import Incident, Investigation
-from src.orchestrator.tools import intel
-from src.orchestrator.tools.toolbox import INVESTIGATOR_TOOLS, Toolbox
+from orchestrator._llm import (
+    MODEL_HAIKU,
+    MODEL_SONNET,
+    StructuredLLMClient,
+    wrap_untrusted_event,
+)
+from orchestrator.schemas.common import AuditEntry
+from orchestrator.schemas.incident import Incident
+from orchestrator.schemas.investigation import (
+    EnrichedIOC,
+    Investigation,
+)
+from orchestrator.schemas.raw_event import RawEvent
+from orchestrator.tools.intel import ThreatIntelLookup
 
-AGENT_NAME = "InvestigatorAgent"
-PROMPT = "investigator"
-JEV_VERIFY_THRESHOLD = 0.75
+
+class JevInvestigatorProtocol(Protocol):
+    """Protocolo para verificacion de alucinaciones y re-ranking MITRE con System One."""
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def verify_investigation(
+        self,
+        incident_data: dict[str, Any],
+        enriched_iocs: list[dict[str, Any]],
+        investigation_draft: dict[str, Any],
+    ) -> dict[str, float]: ...
+
+    def rank_mitre_candidates(
+        self,
+        incident_data: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        top_k: int = 5,
+    ) -> list[str]: ...
 
 
-def build_user_content(
-    incident: Incident,
-    *,
-    enriched_iocs: list[dict[str, Any]] | None = None,
-    technique_shortlist: list[dict[str, Any]] | None = None,
-    retry_rules: str | None = None,
-) -> str:
-    payload = json.dumps(incident.model_dump(mode="json"), indent=2)
-    content = (
-        f"<incident>\n{payload}\n</incident>\n\n"
-        "Enrich every observable, verify each ATT&CK technique before citing it, "
-        "and return the Investigation JSON object."
-    )
-    if enriched_iocs is not None:
-        content += f"\n\n<enriched_iocs>\n{json.dumps(enriched_iocs, indent=2)}</enriched_iocs>"
-    if technique_shortlist is not None:
-        content += (
-            "\n\n<mitre_shortlist>\n"
-            f"{json.dumps(technique_shortlist, indent=2)}\n"
-            "</mitre_shortlist>\nUse only technique ids from this shortlist."
+PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "investigator.md"
+
+_NO_FALLBACK_PROMPT = (
+    "You are a Senior SOC Tier-2 Threat Hunter and Forensic Investigator."
+)
+
+
+class InvestigatorAgent:
+    """Enriquece IOCs, mapea MITRE ATT&CK y ejecuta la cascada Haiku -> Jev -> Sonnet."""
+
+    def __init__(
+        self,
+        llm_client: StructuredLLMClient | None = None,
+        intel_tool: ThreatIntelLookup | None = None,
+        jev_engine: JevInvestigatorProtocol | None = None,
+        fast_model: str = MODEL_HAIKU,
+        reasoning_model: str = MODEL_SONNET,
+        grounding_threshold: float = 0.75,
+    ) -> None:
+        self.llm = llm_client or StructuredLLMClient()
+        self.intel = intel_tool or ThreatIntelLookup()
+        self.jev = jev_engine
+        self.fast_model = fast_model
+        self.reasoning_model = reasoning_model
+        self.grounding_threshold = grounding_threshold
+        self._system_prompt = (
+            PROMPT_PATH.read_text(encoding="utf-8")
+            if PROMPT_PATH.exists()
+            else _NO_FALLBACK_PROMPT
         )
-    if retry_rules:
-        content += (
-            "\n\n<JEV_RETRY_RULES>\n"
-            f"{retry_rules}\n"
-            "</JEV_RETRY_RULES>\nCorrect every listed rule failure."
+
+    def run(
+        self,
+        incident: Incident,
+        raw_event: RawEvent,
+    ) -> tuple[Investigation, list[AuditEntry]]:
+        """Ejecuta el enriquecimiento determinista y la cascada SDE supervisada por Jev."""
+        audit_entries: list[AuditEntry] = []
+
+        # 1. Enriquecimiento determinista de IOCs ANTES de llamar a Jev o al LLM
+        enriched_iocs: list[EnrichedIOC] = self.intel.enrich_event_indicators(
+            raw_event=raw_event,
+            initial_indicators=incident.initial_indicators,
         )
-    return content
-
-
-def _check(incident: Incident):
-    """Build the post-validation guard for this incident.
-
-    Runs inside the retry loop, so a violation is a correction the model gets to
-    act on rather than a crash.
-    """
-
-    def guard(investigation: Investigation) -> None:
-        if investigation.incident_id != incident.incident_id:
-            raise ValueError(
-                f"incident_id must be copied exactly: expected "
-                f"{incident.incident_id!r}, got {investigation.incident_id!r}"
+        enriched_dicts = [ioc.model_dump(mode="json") for ioc in enriched_iocs]
+        audit_entries.append(
+            AuditEntry(
+                timestamp=datetime.now(UTC),
+                stage="investigate:intel_enrichment",
+                actor="ThreatIntelLookup",
+                action="enrich_iocs",
+                details=(
+                    f"Enriched {len(enriched_iocs)} indicators against local threat intel."
+                ),
             )
-        unverified = [
-            t.technique_id
-            for t in investigation.mitre_techniques
-            if intel.verify_technique(t.technique_id)["status"] != "ok"
+        )
+
+        # 2. Shortlist de tecnicas MITRE ATT&CK candidatas (opcionalmente re-rankeadas por Jev)
+        candidate_techniques = self.intel.get_mitre_candidates_for_category(
+            incident.category.value
+        )
+        if (
+            self.jev is not None
+            and self.jev.enabled
+            and hasattr(self.jev, "rank_mitre_candidates")
+            and candidate_techniques
+        ):
+            ranked_ids = self.jev.rank_mitre_candidates(
+                incident_data=incident.model_dump(mode="json"),
+                candidates=candidate_techniques,
+                top_k=6,
+            )
+            audit_entries.append(
+                AuditEntry(
+                    timestamp=datetime.now(UTC),
+                    stage="investigate:jev_mitre_rerank",
+                    actor="JevEngine (System One)",
+                    action="rerank_attack_techniques",
+                    details=f"Top MITRE candidates selected by Jev: {', '.join(ranked_ids)}",
+                )
+            )
+        else:
+            ranked_ids = [t["technique_id"] for t in candidate_techniques[:8]]
+
+        # 3. Paso 1 del SDE Cascade: Extraccion rapida con modelo economico (Haiku 4.5)
+        base_prompt = self._build_investigation_prompt(
+            incident=incident,
+            raw_event=raw_event,
+            enriched_iocs=enriched_dicts,
+            allowed_mitre_ids=ranked_ids,
+        )
+        draft = self.llm.generate_structured(
+            model=self.fast_model,
+            system_prompt=self._system_prompt,
+            user_prompt=base_prompt,
+            response_model=Investigation,
+            validator=self._validate_mitre_catalog,
+        )
+        audit_entries.append(
+            AuditEntry(
+                timestamp=datetime.now(UTC),
+                stage="investigate:sde_cascade_fast",
+                actor=f"InvestigatorAgent ({self.fast_model})",
+                action="draft_investigation",
+                details=(
+                    f"Generated initial investigation with {len(draft.mitre_techniques)} "
+                    f"ATT&CK techniques."
+                ),
+            )
+        )
+
+        # 4. Paso 2 del SDE Cascade: Auditoria de fidelidad con 3 Nouls en Jev
+        if self.jev is not None and self.jev.enabled:
+            checks = self.jev.verify_investigation(
+                incident_data=incident.model_dump(mode="json"),
+                enriched_iocs=enriched_dicts,
+                investigation_draft=draft.model_dump(mode="json"),
+            )
+            failed_checks = {
+                name: score
+                for name, score in checks.items()
+                if score < self.grounding_threshold
+            }
+            audit_entries.append(
+                AuditEntry(
+                    timestamp=datetime.now(UTC),
+                    stage="investigate:jev_grounding_check",
+                    actor="JevEngine (System One)",
+                    action="verify_llm_output",
+                    details=(
+                        "Grounding Nouls: "
+                        + ", ".join(f"{k}={v:.2f}" for k, v in checks.items())
+                    ),
+                )
+            )
+
+            # 5. Paso 3 del SDE Cascade: Escalar a Claude Sonnet 5 SOLO si un check falla
+            if failed_checks:
+                escalation_feedback = (
+                    "Jev System One verification flagged low grounding confidence on the "
+                    "fast draft:\n"
+                    + "\n".join(
+                        f"- {name}: Noul={score:.2f} (minimum required: "
+                        f"{self.grounding_threshold:.2f})"
+                        for name, score in failed_checks.items()
+                    )
+                    + "\nStrictly ground every IOC claim in <enriched_threat_intel> and "
+                    "only select MITRE ATT&CK techniques directly evidenced by the "
+                    "telemetry."
+                )
+                draft = self.llm.generate_structured(
+                    model=self.reasoning_model,
+                    system_prompt=self._system_prompt,
+                    user_prompt=(
+                        f"{base_prompt}\n\n<jev_audit_feedback>\n{escalation_feedback}"
+                        "\n</jev_audit_feedback>"
+                    ),
+                    response_model=Investigation,
+                    validator=self._validate_mitre_catalog,
+                )
+                audit_entries.append(
+                    AuditEntry(
+                        timestamp=datetime.now(UTC),
+                        stage="investigate:sde_cascade_escalated",
+                        actor=f"InvestigatorAgent ({self.reasoning_model})",
+                        action="escalate_to_reasoning_model",
+                        details=(
+                            f"Escalated to {self.reasoning_model} due to failed checks: "
+                            f"{list(failed_checks.keys())}"
+                        ),
+                    )
+                )
+
+        # Garantizar que los IOCs enriquecidos deterministas esten presentes en el contrato final
+        if not draft.enriched_iocs and enriched_iocs:
+            data = draft.model_dump(mode="json")
+            data["enriched_iocs"] = [ioc.model_dump(mode="json") for ioc in enriched_iocs]
+            draft = Investigation.model_validate(data)
+
+        return draft, audit_entries
+
+    def _validate_mitre_catalog(self, investigation: Investigation) -> None:
+        """Valida que cada technique_id exista en data/attack/enterprise-techniques.json."""
+        valid_catalog = self.intel.mitre_catalog_by_id
+        if not valid_catalog:
+            return
+        invalid_ids = [
+            tech.technique_id
+            for tech in investigation.mitre_techniques
+            if tech.technique_id not in valid_catalog
         ]
-        if unverified:
+        if invalid_ids:
+            suggestions = sorted(valid_catalog)[:5]
             raise ValueError(
-                "these technique ids are not in the ATT&CK catalog and must be "
-                f"removed or replaced: {', '.join(unverified)}"
+                f"MITRE ATT&CK technique IDs not found in local catalog: {invalid_ids}. "
+                f"Use search_attack_techniques to find valid ids (examples: "
+                f"{', '.join(suggestions)})."
             )
 
-    return guard
-
-
-def investigate(
-    incident: Incident,
-    *,
-    client: Any,
-    model: str = _llm.INVESTIGATOR_MODEL,
-    toolbox: Toolbox | None = None,
-    jev_engine: Any | None = None,
-    fast_model: str = _llm.INVESTIGATOR_FAST_MODEL,
-) -> Investigation:
-    """Turn an escalated incident into a defensible investigation."""
-    toolbox = toolbox if toolbox is not None else Toolbox(names=INVESTIGATOR_TOOLS)
-    engine = jev_engine or _jev.JevEngine()
-    incident_data = incident.model_dump(mode="json")
-    enriched_iocs = [
-        intel.lookup_reputation(observable.value, observable.type)
-        for observable in incident.observables
-    ]
-    candidates = intel.rank_techniques(incident_data, enriched_iocs)
-    if getattr(engine, "enabled", False):
-        ranker = getattr(
-            engine,
-            "rerank_attack_techniques",
-            getattr(engine, "rerank_techniques", None),
+    def _build_investigation_prompt(
+        self,
+        incident: Incident,
+        raw_event: RawEvent,
+        enriched_iocs: list[dict[str, Any]],
+        allowed_mitre_ids: list[str],
+    ) -> str:
+        catalog_subset = [
+            self.intel.mitre_catalog_by_id[tid]
+            for tid in allowed_mitre_ids
+            if tid in self.intel.mitre_catalog_by_id
+        ]
+        return (
+            "Investigate the escalated security incident below using the pre-enriched "
+            "Threat Intel and the allowed MITRE ATT&CK techniques.\n\n"
+            f"<escalated_incident>\n{json.dumps(incident.model_dump(mode='json'), indent=2)}\n</escalated_incident>\n\n"
+            f"<enriched_threat_intel>\n{json.dumps(enriched_iocs, indent=2)}\n</enriched_threat_intel>\n\n"
+            f"<allowed_mitre_attack_catalog>\n{json.dumps(catalog_subset, indent=2)}\n</allowed_mitre_attack_catalog>\n\n"
+            f"{wrap_untrusted_event(raw_event.model_dump(mode='json'))}"
         )
-        if ranker is not None:
-            candidates = ranker(incident_data, enriched_iocs, candidates)
-
-    user_content = build_user_content(
-        incident,
-        enriched_iocs=enriched_iocs,
-        technique_shortlist=candidates,
-    )
-    try:
-        investigation = _llm.complete_validated(
-            Investigation,
-            client=client,
-            model=fast_model if getattr(engine, "enabled", False) else model,
-            system=_llm.load_prompt(PROMPT),
-            user_content=user_content,
-            toolbox=toolbox,
-            extra_check=_check(incident),
-        )
-    except _llm.LLMError as exc:
-        if not getattr(engine, "enabled", False):
-            raise
-        retry_rules = f"- first_pass_validation: {exc}"
-        return _llm.complete_validated(
-            Investigation,
-            client=client,
-            model=model,
-            system=_llm.load_prompt(PROMPT),
-            user_content=build_user_content(
-                incident,
-                enriched_iocs=enriched_iocs,
-                technique_shortlist=candidates,
-                retry_rules=retry_rules,
-            ),
-            toolbox=toolbox,
-            extra_check=_check(incident),
-        )
-
-    verify = getattr(engine, "verify_investigation", None)
-    if not getattr(engine, "enabled", False) or verify is None:
-        return investigation
-    scores = verify(incident_data, enriched_iocs, investigation.model_dump(mode="json"))
-    failed = [
-        f"- {name}: {score:.2f} (< {JEV_VERIFY_THRESHOLD:.2f})"
-        for name, score in scores.items()
-        if score < JEV_VERIFY_THRESHOLD
-    ]
-    if not failed:
-        return investigation
-    return _llm.complete_validated(
-        Investigation,
-        client=client,
-        model=model,
-        system=_llm.load_prompt(PROMPT),
-        user_content=build_user_content(
-            incident,
-            enriched_iocs=enriched_iocs,
-            technique_shortlist=candidates,
-            retry_rules="\n".join(failed),
-        ),
-        toolbox=toolbox,
-        extra_check=_check(incident),
-    )

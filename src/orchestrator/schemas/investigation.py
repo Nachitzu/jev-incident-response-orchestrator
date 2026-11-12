@@ -1,43 +1,41 @@
 """Investigator output.
 
 The investigator enriches an incident into a defensible hypothesis: which ATT&CK
-techniques it maps to, what the observables' reputation says, and how confident it
-is. Two guardrails against hallucination are encoded here rather than trusted to
-the prompt: every technique id must be well-formed (`T####[.###]`), and the
-hypothesis cannot stand without at least one piece of cited evidence. Verifying
-technique ids against the real ATT&CK catalog happens in the investigator's tool
-layer (Phase 2); this schema enforces the shape.
+techniques it maps to, what the observables' reputation says, and how confident
+it is. Guardrails against hallucination are encoded here rather than trusted to
+the prompt: every technique id must be well-formed (`T####[.YYYY]` style), and
+any evidence items that are present cannot be blank. Verifying technique ids
+against the real ATT&CK catalog happens in the investigator's validation hook;
+grounding against the enriched intel is audited by Jev.
 """
 
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from src.orchestrator.schemas.common import Observable, Severity, ensure_aware
+from orchestrator.schemas.common import (
+    ObservableType,
+    Reputation,
+    Severity,
+    ensure_aware,
+)
 
 _TECHNIQUE_RE = re.compile(r"^T\d{4}(\.\d{3})?$")
 
-KillChainStage = Literal[
-    "recon",
-    "weaponization",
-    "delivery",
-    "exploitation",
-    "installation",
-    "command_and_control",
-    "actions_on_objectives",
-]
 
-Reputation = Literal["malicious", "suspicious", "benign", "unknown"]
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 class MitreTechnique(BaseModel):
     technique_id: str
     name: str = Field(min_length=1)
     tactic: str = Field(min_length=1)
+    evidence: str | None = None
 
     @field_validator("technique_id")
     @classmethod
@@ -49,28 +47,32 @@ class MitreTechnique(BaseModel):
         return value
 
 
-class EnrichedObservable(BaseModel):
-    observable: Observable
+class EnrichedIOC(BaseModel):
+    """One indicator after a threat-intel lookup (local or live)."""
+
+    indicator: str = Field(min_length=1)
+    type: ObservableType | None = None
     reputation: Reputation
     source: str = Field(min_length=1)
-    detail: dict | None = None
+    detail: dict[str, Any] | None = None
 
 
 class Investigation(BaseModel):
     incident_id: str = Field(min_length=1)
-    investigated_at: datetime
-    mitre_techniques: list[MitreTechnique] = Field(default_factory=list)
-    enriched_observables: list[EnrichedObservable] = Field(default_factory=list)
+    investigated_at: datetime = Field(default_factory=_utcnow)
     hypothesis: str = Field(min_length=1)
-    confidence: float = Field(ge=0.0, le=1.0)
-    kill_chain_stage: KillChainStage
-    evidence: list[str] = Field(min_length=1)
+    attack_chain_summary: str = ""
+    mitre_techniques: list[MitreTechnique] = Field(default_factory=list)
+    enriched_iocs: list[EnrichedIOC] = Field(default_factory=list)
+    affected_assets: list[str] = Field(default_factory=list)
     recommended_severity: Severity
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence: list[str] = Field(default_factory=list)
 
     @field_validator("investigated_at")
     @classmethod
     def _ensure_aware(cls, value: datetime) -> datetime:
-        return ensure_aware(value)
+        return ensure_aware(value) or value
 
     @field_validator("evidence")
     @classmethod

@@ -1,9 +1,9 @@
-"""The tool surface the investigator and responder are given in API mode.
+"""The tool surface an agent can be given in an API tool loop.
 
 `Toolbox` is deliberately thin: it publishes Anthropic tool `definitions` and a
-`dispatch()` that returns `(content, is_error)`. Both halves are data, so a test
-can substitute a fake toolbox without touching the agents, and an agent never
-learns where a lookup actually came from.
+`dispatch()` that returns `(content, is_error)`. Both halves are data, so a
+test can substitute a fake toolbox without touching the agents, and an agent
+never learns where a lookup actually came from.
 
 Every handler degrades gracefully. A lookup that finds nothing returns a normal
 result saying so; only a genuinely malformed call is flagged `is_error`, because
@@ -14,10 +14,11 @@ is not that.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from src.orchestrator.tools import intel
+from orchestrator.tools import intel
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -152,6 +153,6 @@ class Toolbox:
             result = handler(arguments)
         except KeyError as exc:
             return json.dumps({"error": f"missing required argument {exc}"}), True
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # noqa: BLE001 - the error text goes to the model
             return json.dumps({"error": f"{type(exc).__name__}: {exc}"}), True
         return json.dumps(result, default=str), False

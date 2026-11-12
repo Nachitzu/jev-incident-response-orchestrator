@@ -1,69 +1,45 @@
-"""Pydantic contracts exchanged between the orchestrator's agents.
+"""The Pydantic contracts exchanged between the agents and the orchestrator."""
 
-Everything a caller needs is re-exported here so downstream code writes
-`from src.orchestrator.schemas import Incident`.
-"""
-
-from src.orchestrator.schemas.case_report import (
-    AuditEntry,
-    CaseReport,
-    FinalState,
-    Stage,
-)
-from src.orchestrator.schemas.common import (
+from orchestrator.schemas.case_report import AuditEntry, CaseReport, FinalState
+from orchestrator.schemas.common import (
+    SEVERITY_ORDER,
     IncidentCategory,
     Observable,
     ObservableType,
-    SystemOneTelemetry,
-    Severity,
-    ensure_aware,
-    is_internal_ip,
-)
-from src.orchestrator.schemas.incident import DetectionResult, Incident
-from src.orchestrator.schemas.investigation import (
-    EnrichedObservable,
-    Investigation,
-    KillChainStage,
-    MitreTechnique,
     Reputation,
+    Severity,
+    SystemOneTelemetry,
 )
-from src.orchestrator.schemas.raw_event import RawEvent, SeverityHint
-from src.orchestrator.schemas.response_plan import (
+from orchestrator.schemas.incident import Incident
+from orchestrator.schemas.investigation import (
+    EnrichedIOC,
+    Investigation,
+    MitreTechnique,
+)
+from orchestrator.schemas.raw_event import RawEvent
+from orchestrator.schemas.response_plan import (
     DESTRUCTIVE_MARKERS,
-    Phase,
     PlaybookStep,
     ResponsePlan,
 )
 
 __all__ = [
-    # common
-    "Severity",
-    "IncidentCategory",
-    "ObservableType",
-    "Observable",
-    "SystemOneTelemetry",
-    "is_internal_ip",
-    "ensure_aware",
-    # raw event
-    "RawEvent",
-    "SeverityHint",
-    # incident
+    "DESTRUCTIVE_MARKERS",
+    "SEVERITY_ORDER",
+    "AuditEntry",
+    "CaseReport",
+    "EnrichedIOC",
+    "FinalState",
     "Incident",
-    "DetectionResult",
-    # investigation
+    "IncidentCategory",
     "Investigation",
     "MitreTechnique",
-    "EnrichedObservable",
-    "KillChainStage",
-    "Reputation",
-    # response plan
-    "ResponsePlan",
+    "Observable",
+    "ObservableType",
     "PlaybookStep",
-    "Phase",
-    "DESTRUCTIVE_MARKERS",
-    # case report
-    "CaseReport",
-    "AuditEntry",
-    "Stage",
-    "FinalState",
+    "RawEvent",
+    "Reputation",
+    "ResponsePlan",
+    "Severity",
+    "SystemOneTelemetry",
 ]

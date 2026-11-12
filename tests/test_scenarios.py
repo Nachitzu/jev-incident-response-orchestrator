@@ -12,13 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from src.orchestrator.schemas import RawEvent
-from src.orchestrator.schemas.common import IncidentCategory
+from orchestrator.schemas import RawEvent
+from orchestrator.schemas.common import IncidentCategory
 
 SCENARIO_DIR = Path(__file__).resolve().parents[1] / "data" / "scenarios"
 LABELS_PATH = SCENARIO_DIR / "labels.json"
 
-VALID_CATEGORIES = set(IncidentCategory.__args__)
+VALID_CATEGORIES = {c.value for c in IncidentCategory}
 
 
 def _scenario_files() -> list[Path]:

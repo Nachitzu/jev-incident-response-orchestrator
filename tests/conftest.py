@@ -1,30 +1,37 @@
-"""Shared fixtures for the contract tests. No test here reaches the network."""
+"""Shared fixtures and offline doubles for the suite. No test reaches the network."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
-from src.orchestrator.schemas import (
-    AuditEntry,
+from orchestrator.schemas import (
     Incident,
+    IncidentCategory,
     Investigation,
     MitreTechnique,
-    Observable,
     PlaybookStep,
     RawEvent,
     ResponsePlan,
+    Severity,
 )
 
-UTC = timezone.utc
 
-
-@pytest.fixture
-def observable_ip() -> Observable:
-    return Observable(type="ip", value="185.220.101.34", context="known tor exit")
+@pytest.fixture(autouse=True)
+def _offline_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stray real key in the environment can never be used by a test."""
+    for var in (
+        "ANTHROPIC_API_KEY",
+        "ABUSEIPDB_API_KEY",
+        "TYPESAFE_API_KEY",
+        "SOAR_JEV_MODE",
+        "SOAR_FP_NOUL_THRESHOLD",
+        "SOAR_HITL_CONFIDENCE_MIN",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture
@@ -37,47 +44,47 @@ def raw_event() -> RawEvent:
         event_type="authentication_failure_burst",
         severity_hint="high",
         source_ip="185.220.101.34",
-        dest_ip="10.0.1.12",
+        destination_ip="10.0.1.12",
+        hostname="dc01",
         user="admin",
-        host="dc01",
         raw_log="47 failed SSH logins for 'admin' in 120s, then 1 success",
         observables=["185.220.101.34"],
     )
 
 
 @pytest.fixture
-def incident(observable_ip: Observable) -> Incident:
+def incident() -> Incident:
     return Incident(
         incident_id="inc-0001",
-        created_at=datetime(2026, 7, 8, 3, 13, tzinfo=UTC),
-        triggering_events=["evt-0001"],
+        source_event_id="evt-0001",
         title="Probable SSH brute-force compromise of a domain controller",
-        category="brute_force",
-        severity="HIGH",
-        detection_confidence=0.82,
-        rationale="47 failed logins followed by a success against a critical asset",
-        observables=[observable_ip],
+        summary="47 failed logins followed by a success against a critical asset.",
+        severity=Severity.HIGH,
+        category=IncidentCategory.BRUTE_FORCE,
+        confidence=0.82,
+        escalate=True,
+        initial_indicators=["185.220.101.34"],
     )
 
 
 @pytest.fixture
-def mitre_technique() -> MitreTechnique:
-    return MitreTechnique(
-        technique_id="T1110.001", name="Password Guessing", tactic="Credential Access"
-    )
-
-
-@pytest.fixture
-def investigation(mitre_technique: MitreTechnique) -> Investigation:
+def investigation() -> Investigation:
     return Investigation(
         incident_id="inc-0001",
-        investigated_at=datetime(2026, 7, 8, 3, 20, tzinfo=UTC),
-        mitre_techniques=[mitre_technique],
         hypothesis="External actor brute-forced SSH and gained an admin session.",
+        attack_chain_summary="Credential access escalating into exploitation of a DC.",
+        mitre_techniques=[
+            MitreTechnique(
+                technique_id="T1110.001",
+                name="Password Guessing",
+                tactic="Credential Access",
+                evidence="47 failed logins then a success in 120s.",
+            )
+        ],
+        affected_assets=["dc01"],
+        recommended_severity=Severity.CRITICAL,
         confidence=0.78,
-        kill_chain_stage="exploitation",
         evidence=["47 failed logins then success", "source IP is a known tor exit"],
-        recommended_severity="CRITICAL",
     )
 
 
@@ -106,9 +113,7 @@ def destructive_step() -> PlaybookStep:
 
 
 @pytest.fixture
-def response_plan(
-    safe_step: PlaybookStep, destructive_step: PlaybookStep
-) -> ResponsePlan:
+def response_plan(safe_step: PlaybookStep, destructive_step: PlaybookStep) -> ResponsePlan:
     return ResponsePlan(
         incident_id="inc-0001",
         planned_at=datetime(2026, 7, 8, 3, 25, tzinfo=UTC),
@@ -120,100 +125,133 @@ def response_plan(
     )
 
 
-@pytest.fixture
-def audit_entry() -> AuditEntry:
-    return AuditEntry(
-        timestamp=datetime(2026, 7, 8, 3, 13, tzinfo=UTC),
-        stage="detection",
-        agent="DetectorAgent",
-        model="claude-haiku-4-5",
-        decision="escalate",
-        inputs_digest="1 event, brute_force signature on dc01",
-    )
+class FakeStructuredLLM:
+    """Structured-client double that replays pre-built contract objects.
 
-
-@pytest.fixture(autouse=True)
-def _no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stray real key in the environment can never be used by a test."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ABUSEIPDB_API_KEY", raising=False)
-    monkeypatch.delenv("SOAR_MODEL", raising=False)
-
-
-# --------------------------------------------------------------------------
-# Offline doubles for the Anthropic client and the toolbox
-# --------------------------------------------------------------------------
-@dataclass
-class FakeBlock:
-    """One content block, shaped like the SDK's but built by hand."""
-
-    type: str
-    text: str | None = None
-    name: str | None = None
-    input: dict | None = None
-    id: str | None = None
-
-
-@dataclass
-class FakeResponse:
-    content: list[FakeBlock]
-
-
-def text_block(text: str) -> FakeBlock:
-    return FakeBlock(type="text", text=text)
-
-
-def tool_use_block(name: str, arguments: dict, block_id: str = "tu-1") -> FakeBlock:
-    return FakeBlock(type="tool_use", name=name, input=arguments, id=block_id)
-
-
-class FakeClient:
-    """Replays a scripted list of replies instead of calling the API.
-
-    A reply is either a string (turned into a single text block) or a list of
-    blocks, which is how a tool-use turn is expressed. Every request is recorded
-    in `calls`, so a test can assert on the model, the tools, and the retry
-    messages the agent actually sent.
+    A reply is either a model instance (returned after the agent's `validator`
+    ran, so contract guards are exercised) or an exception (raised). Every call
+    is recorded so tests can assert which model the cascade actually used.
     """
 
-    def __init__(self, replies: list) -> None:
-        self._replies = list(replies)
-        self.calls: list[dict] = []
+    def __init__(self, responses: list[Any]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def generate_structured(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: Any,
+        validator: Any = None,
+        toolbox: Any = None,
+    ) -> Any:
+        self.calls.append(
+            {"model": model, "user_prompt": user_prompt, "response_model": response_model}
+        )
+        if not self._responses:
+            raise AssertionError("FakeStructuredLLM ran out of scripted replies")
+        result = self._responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        if not isinstance(result, response_model):
+            raise TypeError(
+                f"scripted reply {type(result).__name__} does not satisfy "
+                f"{response_model.__name__}"
+            )
+        if validator is not None:
+            validator(result)
+        return result
+
+
+@dataclass(frozen=True)
+class FakeTriage:
+    prompt_injection_prob: float = 0.02
+    is_threat_prob: float = 0.10
+    already_contained_prob: float = 0.05
+    category_fits_prob: float = 0.90
+    category: str = "recon"
+    category_confidence: float = 0.88
+    category_probabilities: dict[str, float] = field(default_factory=dict)
+    severity_score: float = 0.15
+    severity_label: str = "low"
+    severity_confidence: float = 0.92
+    requires_escalation: bool = False
+    drop_reason: str | None = None
+
+
+class FakeJev:
+    """Jev double implementing the detector, investigator and responder protocols."""
+
+    def __init__(
+        self,
+        triage: FakeTriage | None = None,
+        grounding_checks: dict[str, float] | None = None,
+        ranked_mitre: list[str] | None = None,
+        playbook_choice: str | None = None,
+        step_scores: list[tuple[float, float, float]] | None = None,
+        enabled: bool = True,
+        mode: str = "hybrid",
+    ) -> None:
+        self._triage = triage or FakeTriage()
+        self._grounding = grounding_checks or {
+            "grounded_in_iocs": 0.95,
+            "mitre_coherent": 0.91,
+            "no_speculation": 0.89,
+        }
+        self._ranked = ranked_mitre or ["T1110", "T1078"]
+        self._playbook = playbook_choice
+        self._step_scores = step_scores
+        self._enabled = enabled
+        self.mode = mode
+        self.triage_calls = 0
+        self.verify_calls = 0
+        self.rank_calls = 0
+        self.playbook_calls = 0
+        self.score_calls = 0
 
     @property
-    def messages(self):  # mirrors client.messages.create(...)
-        return self
+    def enabled(self) -> bool:
+        return self._enabled
 
-    def create(self, **kwargs) -> FakeResponse:
-        self.calls.append(kwargs)
-        if not self._replies:
-            raise AssertionError("FakeClient ran out of scripted replies")
-        reply = self._replies.pop(0)
-        if isinstance(reply, str):
-            return FakeResponse(content=[text_block(reply)])
-        return FakeResponse(content=list(reply))
+    def evaluate_raw_event(self, raw_event: dict[str, Any]) -> FakeTriage:
+        self.triage_calls += 1
+        return self._triage
 
+    def verify_investigation(
+        self,
+        incident_data: dict[str, Any],
+        enriched_iocs: list[dict[str, Any]],
+        investigation_draft: dict[str, Any],
+    ) -> dict[str, float]:
+        self.verify_calls += 1
+        return self._grounding
 
-class FakeToolbox:
-    """A toolbox whose answers are fixed, to isolate an agent from the data set."""
+    def rank_mitre_candidates(
+        self,
+        incident_data: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        top_k: int = 5,
+    ) -> list[str]:
+        self.rank_calls += 1
+        return self._ranked[:top_k]
 
-    def __init__(self, results: dict[str, dict] | None = None) -> None:
-        self.results = results or {}
-        self.calls: list[tuple[str, dict]] = []
+    def select_playbook(
+        self,
+        incident_data: dict[str, Any],
+        investigation_data: dict[str, Any],
+        playbooks: dict[str, dict[str, Any]],
+    ) -> str:
+        self.playbook_calls += 1
+        return self._playbook or incident_data["category"]
 
-    @property
-    def definitions(self) -> list[dict]:
-        return [
-            {
-                "name": name,
-                "description": "fake",
-                "input_schema": {"type": "object", "properties": {}},
-            }
-            for name in self.results
-        ]
-
-    def dispatch(self, name: str, arguments: dict) -> tuple[str, bool]:
-        self.calls.append((name, arguments))
-        if name not in self.results:
-            return json.dumps({"error": f"unknown tool {name!r}"}), True
-        return json.dumps(self.results[name]), False
+    def score_response_steps(
+        self,
+        incident_data: dict[str, Any],
+        steps: list[dict[str, Any]],
+    ) -> list[tuple[float, float, float]]:
+        self.score_calls += 1
+        if self._step_scores is not None:
+            return self._step_scores[: len(steps)]
+        return [(0.2, 1.0, 0.9) for _ in steps]

@@ -7,12 +7,18 @@ from typing import Any
 
 from typesafe_sdk import Choice, Noul, Score, TypeSafeClient
 
+JEV_MODES = frozenset({"hybrid", "jev-only", "disabled"})
+
+SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
+
 
 @dataclass(frozen=True)
 class TriageAssessment:
-    """Resultado atómico de la batería de detección en una sola llamada Jev."""
+    """Resultado atomica de la bateria de deteccion en una sola llamada Jev."""
+
     prompt_injection_prob: float
     is_threat_prob: float
+    already_contained_prob: float
     category_fits_prob: float
     category: str
     category_confidence: float
@@ -23,8 +29,6 @@ class TriageAssessment:
     requires_escalation: bool
     drop_reason: str | None = None
 
-
-SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
 
 DETECTOR_BATTERY = {
     # 1. Guardrail Cookbook: Detectar Prompt Injection en payloads de logs
@@ -52,14 +56,26 @@ DETECTOR_BATTERY = {
             "false": "Benign operational noise, authorized maintenance, or already-mitigated routine false positive.",
         },
     ),
-    # 3. Companion Noul: Verificar si encaja en el catálogo cerrado
+    # 2b. ¿La amenaza ya fue contenida por el control plano (EDR/gateway/firewall)?
+    "already_contained": Noul(
+        instructions=(
+            "Was this threat fully blocked, quarantined, or mitigated at "
+            "ingestion by the EDR, email gateway, or firewall such that it "
+            "never executed or delivered its payload on the target?"
+        ),
+        criteria={
+            "true": "The telemetry itself shows the control plane stopped the threat end to end.",
+            "false": "Execution, delivery, or persistence succeeded, or containment is unconfirmed.",
+        },
+    ),
+    # 3. Companion Noul: Verificar si encaja en el catalogo cerrado
     "category_fits": Noul(
         instructions=(
             "Does this security event clearly fit into one of the standard incident "
             "categories: phishing, brute_force, malware, exfiltration, lateral_movement, or recon?"
         ),
     ),
-    # 4. Choice: Categoría cerrada del incidente
+    # 4. Choice: Categoria cerrada del incidente
     "incident_category": Choice(
         instructions="Which incident category best describes the security event?",
         criteria={
@@ -85,15 +101,21 @@ DETECTOR_BATTERY = {
 
 
 class JevEngine:
-    """Wrapper síncrono reutilizable sobre TypeSafeClient."""
+    """Wrapper sincrono reutilizable sobre TypeSafeClient."""
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, mode: str | None = None) -> None:
         self._api_key = api_key or os.getenv("TYPESAFE_API_KEY")
         self._client = TypeSafeClient(api_key=self._api_key) if self._api_key else None
+        resolved = (mode or os.getenv("SOAR_JEV_MODE") or "hybrid").strip().lower()
+        if resolved not in JEV_MODES:
+            raise ValueError(
+                f"SOAR_JEV_MODE must be one of {sorted(JEV_MODES)}, got {resolved!r}"
+            )
+        self.mode = resolved
 
     @property
     def enabled(self) -> bool:
-        return self._client is not None and os.getenv("SOAR_JEV_MODE", "hybrid") != "disabled"
+        return self._client is not None and self.mode != "disabled"
 
     def evaluate_raw_event(self, raw_event: dict[str, Any]) -> TriageAssessment:
         """Ejecuta Speculative Fan-Out sobre el evento crudo en 1 request."""
@@ -107,6 +129,7 @@ class JevEngine:
 
         pi_prob = resp.nouls["prompt_injection"].noul
         threat_prob = resp.nouls["is_threat"].noul
+        contained_prob = resp.nouls["already_contained"].noul
         fits_prob = resp.nouls["category_fits"].noul
 
         cat_ans = resp.choices["incident_category"]
@@ -129,6 +152,7 @@ class JevEngine:
         return TriageAssessment(
             prompt_injection_prob=pi_prob,
             is_threat_prob=threat_prob,
+            already_contained_prob=contained_prob,
             category_fits_prob=fits_prob,
             category=cat_ans.choice if fits_prob >= 0.35 else "other",
             category_confidence=cat_ans.confidence,
@@ -147,7 +171,7 @@ class JevEngine:
         investigation_draft: dict[str, Any],
     ) -> dict[str, float]:
         """Cookbook 'Verifying LLM answers against their source' + 'SDE Cascade'.
-        Verifica con Nouls atómicos que el InvestigatorAgent no haya alucinado conclusiones.
+        Verifica con Nouls atomicos que el InvestigatorAgent no haya alucinado conclusiones.
         """
         if not self._client:
             return {"grounded_in_iocs": 1.0, "mitre_coherent": 1.0, "no_speculation": 1.0}
@@ -218,8 +242,19 @@ class JevEngine:
             for score, _, candidate in ranked
         ]
 
-    # Short alias for callers that describe the operation without the ATT&CK name.
-    rerank_techniques = rerank_attack_techniques
+    def rank_mitre_candidates(
+        self,
+        incident_data: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        top_k: int = 5,
+    ) -> list[str]:
+        """Ordered technique ids for an investigator shortlist (offline-safe)."""
+        if not candidates:
+            return []
+        if not self._client:
+            return [c["technique_id"] for c in candidates[:top_k]]
+        ranked = self.rerank_attack_techniques(incident_data, [], candidates)
+        return [c["technique_id"] for c in ranked[:top_k]]
 
     def select_playbook(
         self,
@@ -271,27 +306,25 @@ class JevEngine:
         incident_data: dict[str, Any],
         steps: list[dict[str, Any]],
     ) -> list[tuple[float, float, float]]:
-        """Evalúa en un solo batch el Blast Radius (Score) y la necesidad de HITL (Noul) de cada paso."""
+        """Evalua en un solo batch el Blast Radius (Score) y la necesidad de HITL (Noul) de cada paso."""
         if not self._client or not steps:
             return [(1.0, 1.0, 0.5) for _ in steps]
 
         questions: dict[str, Any] = {}
         for idx, step in enumerate(steps):
             questions[f"hitl_{idx}"] = Noul(
-                instructions={
-                    "question": (
-                        "Does executing this remediation step modify production state, "
-                        "isolate a host, revoke credentials, or block traffic such that "
-                        "human approval is mandatory?"
-                    ),
-                    "target_step": step,
-                }
+                instructions=(
+                    "Does executing this remediation step modify production state, "
+                    "isolate a host, revoke credentials, or block traffic such that "
+                    "human approval is mandatory? "
+                    f"Target step: {step}"
+                ),
             )
             questions[f"blast_{idx}"] = Score(
-                instructions={
-                    "question": "Rate the operational blast radius of executing this action.",
-                    "target_step": step,
-                },
+                instructions=(
+                    f"Rate the operational blast radius of executing this action. "
+                    f"Target step: {step}"
+                ),
                 criteria=[
                     "0 - Read-only: logging, ticketing, or passive monitoring.",
                     "1 - Low disruption: blocking an external malicious IP or URL.",

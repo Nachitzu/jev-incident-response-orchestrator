@@ -1,5 +1,5 @@
-"""Rendering a finished case into something a human reads."""
+"""Case report rendering."""
 
-from src.orchestrator.reporting.markdown import render_markdown, write_report
+from orchestrator.reporting.markdown import render_markdown, write_report
 
 __all__ = ["render_markdown", "write_report"]

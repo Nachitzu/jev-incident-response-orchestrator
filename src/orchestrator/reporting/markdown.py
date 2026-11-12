@@ -8,9 +8,45 @@ someone can read *why* each conclusion was reached, not just what it was.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from src.orchestrator.schemas import CaseReport
+from orchestrator.schemas import CaseReport
+
+# incident_id becomes a file name component: collapse everything that is not a
+# conservative filename character, so a model-invented id like "../../evil" can
+# never write outside the report directory.
+_UNSAFE_FILENAME = re.compile("[^A-Za-z0-9._-]+")
+
+
+def _safe_component(value: str) -> str:
+    cleaned = _UNSAFE_FILENAME.sub("_", value).strip("._")
+    return cleaned or "case"
+
+
+def _escape_cell(text: str) -> str:
+    """Keep one-line table cells intact: pipes escaped, newlines flattened."""
+    return text.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def _format_probability(value: float | None) -> str:
+    return f"{value:.2f}" if value is not None else "—"
+
+
+def _format_choice_distribution(probabilities: dict[str, float]) -> str:
+    if not probabilities:
+        return "—"
+    return ", ".join(
+        f"{choice}={probability:.2f}"
+        for choice, probability in sorted(probabilities.items())
+    )
+
+
+def _format_score(score: float | None, confidence: float | None) -> str:
+    if score is None:
+        return "—"
+    confidence_text = f"{confidence:.2f}" if confidence is not None else "—"
+    return f"{score:.2f} / 3.00 — Confidence: {confidence_text}"
 
 
 def render_markdown(report: CaseReport) -> str:
@@ -25,12 +61,15 @@ def render_markdown(report: CaseReport) -> str:
         f"- **Title:** {inc.title}",
         f"- **Category:** {inc.category}",
         f"- **Severity:** {inc.severity}",
-        f"- **Detection confidence:** {inc.detection_confidence:.2f}",
-        f"- **Rationale:** {inc.rationale}",
+        f"- **Confidence:** {inc.confidence:.2f}",
+        f"- **Escalated:** {'yes' if inc.escalate else 'no'}",
+        f"- **Summary:** {inc.summary}",
     ]
-    if inc.observables:
-        lines.append("- **Observables:**")
-        lines += [f"  - `{o.type}` {o.value}" for o in inc.observables]
+    if inc.false_positive_reason:
+        lines.append(f"- **False positive reason:** {inc.false_positive_reason}")
+    if inc.initial_indicators:
+        lines.append("- **Initial indicators:**")
+        lines += [f"  - `{value}`" for value in inc.initial_indicators]
 
     telemetry = inc.system_one_telemetry
     if telemetry is not None:
@@ -42,12 +81,19 @@ def render_markdown(report: CaseReport) -> str:
             "|------|---------------------|-------|",
             (
                 f"| prompt-injection={_format_probability(telemetry.prompt_injection_noul)}, "
-                f"threat={_format_probability(telemetry.is_threat_noul or telemetry.threat_noul)}, "
+                f"threat={_format_probability(telemetry.is_threat_noul)}, "
+                f"contained={_format_probability(telemetry.already_contained_noul)}, "
                 f"category-fit={_format_probability(telemetry.category_fits_noul)} | "
                 f"{_format_choice_distribution(telemetry.category_probabilities)} | "
                 f"{_format_score(telemetry.severity_score, telemetry.severity_confidence)} |"
             ),
         ]
+        if telemetry.grounding_nouls:
+            grounding = ", ".join(
+                f"{name}={_format_probability(score)}"
+                for name, score in sorted(telemetry.grounding_nouls.items())
+            )
+            lines.append(f"- **Grounding Nouls:** {grounding}")
 
     if report.investigation is not None:
         inv = report.investigation
@@ -55,23 +101,28 @@ def render_markdown(report: CaseReport) -> str:
             "",
             "## Investigation",
             f"- **Hypothesis:** {inv.hypothesis}",
-            f"- **Confidence:** {inv.confidence:.2f}",
-            f"- **Kill-chain stage:** {inv.kill_chain_stage}",
+        ]
+        if inv.confidence is not None:
+            lines.append(f"- **Confidence:** {inv.confidence:.2f}")
+        lines += [
+            f"- **Attack chain:** {inv.attack_chain_summary or '—'}",
             f"- **Recommended severity:** {inv.recommended_severity}",
         ]
         if inv.mitre_techniques:
             lines.append("- **ATT&CK techniques:**")
             lines += [
                 f"  - {t.technique_id} {t.name} ({t.tactic})"
+                + (f" — {t.evidence}" if t.evidence else "")
                 for t in inv.mitre_techniques
             ]
-        if inv.enriched_observables:
-            lines.append("- **Enriched observables:**")
+        if inv.enriched_iocs:
+            lines.append("- **Enriched IOCs:**")
             lines += [
-                f"  - `{e.observable.type}` {e.observable.value} → "
-                f"**{e.reputation}** ({e.source})"
-                for e in inv.enriched_observables
+                f"  - `{ioc.type or '?'}` {ioc.indicator} → **{ioc.reputation}** ({ioc.source})"
+                for ioc in inv.enriched_iocs
             ]
+        if inv.affected_assets:
+            lines.append(f"- **Affected assets:** {', '.join(inv.affected_assets)}")
         if inv.evidence:
             lines.append("- **Evidence:**")
             lines += [f"  - {item}" for item in inv.evidence]
@@ -91,26 +142,34 @@ def render_markdown(report: CaseReport) -> str:
             f"- **Approval:** {flag}",
             f"- **Residual risk:** {plan.residual_risk}",
             "",
-            "| # | Phase | Action | Approval | Automatable |",
-            "|---|-------|--------|----------|-------------|",
+            "| # | Phase | Action | Approval | Automatable | Blast radius | HITL Noul |",
+            "|---|-------|--------|----------|-------------|--------------|-----------|",
         ]
         for step in sorted(plan.steps, key=lambda s: s.order):
             appr = "yes" if step.requires_approval else "no"
             auto = "yes" if step.automatable else "no"
+            blast = (
+                f"{step.blast_radius_score:.2f}"
+                if step.blast_radius_score is not None
+                else "—"
+            )
+            hitl = f"{step.hitl_noul:.2f}" if step.hitl_noul is not None else "—"
             lines.append(
-                f"| {step.order} | {step.phase} | {step.action} | {appr} | {auto} |"
+                f"| {step.order} | {step.phase} | {_escape_cell(step.action)} | "
+                f"{appr} | {auto} | {blast} | {hitl} |"
             )
 
     lines += ["", "## Audit log", ""]
     if report.audit_log:
         lines += [
-            "| Timestamp | Stage | Agent | Model | Decision |",
-            "|-----------|-------|-------|-------|----------|",
+            "| Timestamp | Stage | Actor | Action | Details |",
+            "|-----------|-------|-------|--------|---------|",
         ]
         for entry in report.audit_log:
             lines.append(
-                f"| {entry.timestamp.isoformat()} | {entry.stage} | {entry.agent} | "
-                f"{entry.model or '—'} | {entry.decision} |"
+                f"| {entry.timestamp.isoformat()} | {entry.stage} | "
+                f"{_escape_cell(entry.actor)} | {_escape_cell(entry.action)} | "
+                f"{_escape_cell(entry.details) or '—'} |"
             )
     else:
         lines.append("_(empty)_")
@@ -118,32 +177,13 @@ def render_markdown(report: CaseReport) -> str:
     return "\n".join(lines)
 
 
-def _format_choice_distribution(probabilities: dict[str, float]) -> str:
-    if not probabilities:
-        return "—"
-    return ", ".join(
-        f"{choice}={probability:.2f}"
-        for choice, probability in sorted(probabilities.items())
-    )
-
-
-def _format_probability(value: float | None) -> str:
-    return f"{value:.2f}" if value is not None else "—"
-
-
-def _format_score(score: float | None, confidence: float | None) -> str:
-    if score is None:
-        return "—"
-    confidence_text = f"{confidence:.2f}" if confidence is not None else "—"
-    return f"{score:.2f} / 3.00 — Confidence: {confidence_text}"
-
-
 def write_report(report: CaseReport, out_dir: str | Path) -> tuple[Path, Path]:
     """Write `<incident_id>.md` and `.json` into `out_dir`. Returns both paths."""
     directory = Path(out_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    md_path = directory / f"{report.incident_id}.md"
-    json_path = directory / f"{report.incident_id}.json"
+    safe_id = _safe_component(report.incident_id)
+    md_path = directory / f"{safe_id}.md"
+    json_path = directory / f"{safe_id}.json"
     md_path.write_text(render_markdown(report), encoding="utf-8")
     json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     return md_path, json_path

@@ -1,9 +1,6 @@
-"""Offline tools shared by both run modes.
+"""Deterministic, offline tooling: threat intel, ATT&CK, playbooks."""
 
-`intel` holds the lookups themselves; `toolbox` wraps them as an Anthropic tool
-surface for API mode. Importing either one never touches the network.
-"""
+from orchestrator.tools import intel
+from orchestrator.tools.toolbox import RESPONDER_TOOLS, TOOL_DEFINITIONS, Toolbox
 
-from src.orchestrator.tools import intel, toolbox
-
-__all__ = ["intel", "toolbox"]
+__all__ = ["RESPONDER_TOOLS", "TOOL_DEFINITIONS", "Toolbox", "intel"]

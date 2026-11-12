@@ -1,10 +1,9 @@
-"""`soar-tool`: the deterministic, offline plumbing behind the Claude Code console mode.
+"""`soar-tool`: the deterministic, offline plumbing behind the console mode.
 
 This is the half of the pipeline that must NOT be a language model: contract
-validation, offline threat-intel and ATT&CK lookups, playbook selection, and report
-rendering. In API mode the agents call these same primitives; in console mode the
-live Claude Code session does the reasoning and shells out to `soar-tool` for every
-deterministic step. Nothing here touches the network or needs `ANTHROPIC_API_KEY`.
+validation, offline threat-intel and ATT&CK lookups, playbook selection, and
+report rendering. Nothing here touches the network unless `ABUSEIPDB_API_KEY` is
+set.
 
 Subcommands
 -----------
@@ -31,26 +30,26 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from src.orchestrator.reporting import write_report
-from src.orchestrator.schemas import (
+from orchestrator.reporting import write_report
+from orchestrator.schemas import (
+    AuditEntry,
     CaseReport,
-    DetectionResult,
     Incident,
     Investigation,
     RawEvent,
     ResponsePlan,
 )
-from src.orchestrator.tools import intel
+from orchestrator.tools import intel
 
 # Schema name (as used on the CLI) -> model. Kebab-case keys match how a human
 # would type them; the console slash-commands pass the same strings.
 SCHEMAS: dict[str, type[BaseModel]] = {
     "raw-event": RawEvent,
     "incident": Incident,
-    "detection-result": DetectionResult,
     "investigation": Investigation,
     "response-plan": ResponsePlan,
     "case-report": CaseReport,
+    "audit-entry": AuditEntry,
 }
 
 
@@ -153,7 +152,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="soar-tool",
-        description="Deterministic, offline plumbing for the Claude Code console mode "
+        description="Deterministic, offline plumbing for the console mode "
         "(validation, threat-intel, ATT&CK, playbooks, reporting). No API key needed.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
