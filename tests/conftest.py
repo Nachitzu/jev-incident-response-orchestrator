@@ -27,6 +27,8 @@ def _offline_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "ANTHROPIC_API_KEY",
         "ABUSEIPDB_API_KEY",
         "TYPESAFE_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "SOAR_LLM_PROVIDER",
         "SOAR_JEV_MODE",
         "SOAR_FP_NOUL_THRESHOLD",
         "SOAR_HITL_CONFIDENCE_MIN",

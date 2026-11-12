@@ -7,11 +7,18 @@ that feeds the exact contract error back to the model. System prompts written
 as Markdown send only their ```text fenced block; the surrounding rationale
 stays for human readers. Nothing here imports a concrete agent and the raw
 client is injected or built lazily, so every test can run offline against fakes.
+
+Providers. `SOAR_LLM_PROVIDER` selects the backend: `anthropic` (default) or
+`deepseek`, which speaks the Anthropic Messages format at
+`https://api.deepseek.com/anthropic` and is therefore driven by the same SDK.
+Each provider carries its own (fast, reasoning) model pair so the SDE cascade
+keeps a real reasoning tier instead of two names for the same model.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable
 from typing import Any, Protocol, TypeVar
@@ -23,6 +30,33 @@ from pydantic import BaseModel
 # denser inputs and get the stronger one.
 MODEL_HAIKU = "claude-haiku-4-5-20251001"
 MODEL_SONNET = "claude-sonnet-5"
+
+LLM_PROVIDERS = frozenset({"anthropic", "deepseek"})
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+MODEL_DEEPSEEK_FLASH = "deepseek-flash"
+MODEL_DEEPSEEK_PRO = "deepseek-v4-pro"
+
+
+def resolve_provider() -> str:
+    """The configured LLM provider; `anthropic` unless SOAR_LLM_PROVIDER says otherwise."""
+    provider = (os.getenv("SOAR_LLM_PROVIDER") or "anthropic").strip().lower()
+    if provider not in LLM_PROVIDERS:
+        raise LLMError(
+            f"SOAR_LLM_PROVIDER must be one of {sorted(LLM_PROVIDERS)}, "
+            f"got {provider!r}"
+        )
+    return provider
+
+
+def default_models(provider: str) -> tuple[str, str]:
+    """(fast, reasoning) model names for a provider — two tiers, never one."""
+    if provider == "deepseek":
+        return MODEL_DEEPSEEK_FLASH, MODEL_DEEPSEEK_PRO
+    if provider == "anthropic":
+        return MODEL_HAIKU, MODEL_SONNET
+    raise LLMError(
+        f"unknown LLM provider {provider!r}; expected one of {sorted(LLM_PROVIDERS)}"
+    )
 
 MAX_TOKENS = 4096
 MAX_TOOL_ROUNDS = 6
@@ -169,7 +203,24 @@ class StructuredLLMClient:
                 from anthropic import Anthropic
             except ImportError as exc:  # pragma: no cover - dependency is declared
                 raise LLMError(f"the anthropic SDK is not installed: {exc}") from exc
-            self._client = Anthropic()
+            provider = resolve_provider()
+            if provider == "deepseek":
+                api_key = os.getenv("DEEPSEEK_API_KEY")
+                if not api_key:
+                    raise LLMError(
+                        "SOAR_LLM_PROVIDER=deepseek requires DEEPSEEK_API_KEY"
+                    )
+                self._client = Anthropic(
+                    base_url=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
+                    api_key=api_key,
+                )
+            else:
+                api_key = os.getenv("ANTHROPIC_API_KEY")
+                if not api_key:
+                    raise LLMError(
+                        "the anthropic provider requires ANTHROPIC_API_KEY"
+                    )
+                self._client = Anthropic(api_key=api_key)
         return self._client
 
     def generate_structured(

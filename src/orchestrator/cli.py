@@ -1,7 +1,8 @@
 """`soar-orchestrator`: the API-mode entry point.
 
 Runs a scenario through detect -> investigate -> respond and writes the case
-report. This is the mode that needs `ANTHROPIC_API_KEY`; if you would rather not
+report. This is the mode that needs an LLM key (`ANTHROPIC_API_KEY`, or
+`DEEPSEEK_API_KEY` with `SOAR_LLM_PROVIDER=deepseek`); if you would rather not
 use one, the deterministic half still runs offline through `soar-tool`.
 
     soar-orchestrator run data/scenarios/phishing-01.json
@@ -16,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-from orchestrator._llm import StructuredLLMClient
+from orchestrator._llm import LLMError, StructuredLLMClient, resolve_provider
 from orchestrator.orchestrator import OrchestratorError, load_events, run_case
 from orchestrator.reporting import write_report
 from orchestrator.tools import intel
@@ -31,9 +32,14 @@ def _build_client() -> StructuredLLMClient:
     Kept out of the agents on purpose: they take a client, they never make one,
     which is what lets every test run offline.
     """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    try:
+        provider = resolve_provider()
+    except LLMError as exc:  # SOAR_LLM_PROVIDER set to something unsupported
+        raise SystemExit(str(exc)) from exc
+    required = "DEEPSEEK_API_KEY" if provider == "deepseek" else "ANTHROPIC_API_KEY"
+    if not os.environ.get(required):
         raise SystemExit(
-            "ANTHROPIC_API_KEY is not set.\n"
+            f"SOAR_LLM_PROVIDER={provider} but {required} is not set.\n"
             "Either export it (see .env.example), or run the deterministic half "
             "without a key:\n"
             "    soar-tool validate --schema incident --in incident.json"
@@ -85,6 +91,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             events,
             llm_client=client,
             incident_id=scenario.stem,
+            fast_model=args.model,
+            reasoning_model=args.model,
         )
     except OrchestratorError as exc:
         print(exc, file=sys.stderr)

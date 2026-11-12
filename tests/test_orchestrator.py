@@ -14,6 +14,7 @@ from orchestrator.schemas import (
     Incident,
     IncidentCategory,
     Investigation,
+    PlaybookStep,
     RawEvent,
     ResponsePlan,
     Severity,
@@ -247,3 +248,104 @@ def test_run_case_honours_hitl_threshold_env(
     llm = FakeStructuredLLM([mid, investigation, plan])
     report = run_case([raw_event], llm_client=llm, jev_engine=jev)
     assert report.final_state == "escalated_to_human"
+
+
+# --------------------------------------------------------------------------
+# Model tier routing
+# --------------------------------------------------------------------------
+def _cascade_payloads() -> list:
+    """Detector incident, ungrounded draft, corrected draft, safe plan."""
+    high = Incident(
+        incident_id="inc-0001",
+        source_event_id="evt-0001",
+        title="Sustained brute force",
+        summary="Repeated successful auth anomalies.",
+        severity=Severity.HIGH,
+        category=IncidentCategory.BRUTE_FORCE,
+        confidence=0.82,
+        escalate=True,
+    )
+    draft1 = Investigation(
+        incident_id="inc-0001", hypothesis="Draft guess.", recommended_severity=Severity.HIGH
+    )
+    draft2 = Investigation(
+        incident_id="inc-0001",
+        hypothesis="Corrected, grounded hypothesis.",
+        recommended_severity=Severity.HIGH,
+    )
+    plan = ResponsePlan(
+        incident_id="inc-0001",
+        planned_at=NOW,
+        playbook_name="brute_force",
+        summary="Watch and rotate.",
+        steps=[
+            PlaybookStep(
+                order=1,
+                phase="containment",
+                action="Notify the on-call analyst",
+                requires_approval=False,
+                justification="Non-destructive.",
+            )
+        ],
+        requires_human_approval=False,
+        residual_risk="Low.",
+    )
+    return [high, draft1, draft2, plan]
+
+
+_UNGROUNDED = {"grounded_in_iocs": 0.40, "mitre_coherent": 0.90}
+
+
+def test_run_case_routes_model_tiers(raw_event):
+    """Fast tier for detector + first SDE step; reasoning tier for escalation + responder."""
+    jev = FakeJev(
+        triage=FakeTriage(is_threat_prob=0.8, requires_escalation=True),
+        grounding_checks=_UNGROUNDED,
+    )
+    llm = FakeStructuredLLM(_cascade_payloads())
+    run_case(
+        [raw_event],
+        llm_client=llm,
+        jev_engine=jev,
+        fast_model="tier-fast",
+        reasoning_model="tier-deep",
+    )
+    assert [c["model"] for c in llm.calls] == [
+        "tier-fast",
+        "tier-fast",
+        "tier-deep",
+        "tier-deep",
+    ]
+
+
+def test_run_case_default_tiers_follow_the_provider(raw_event, monkeypatch):
+    """Without explicit overrides the provider's own (fast, reasoning) pair routes."""
+    monkeypatch.setenv("SOAR_LLM_PROVIDER", "deepseek")
+    jev = FakeJev(
+        triage=FakeTriage(is_threat_prob=0.8, requires_escalation=True),
+        grounding_checks=_UNGROUNDED,
+    )
+    llm = FakeStructuredLLM(_cascade_payloads())
+    run_case([raw_event], llm_client=llm, jev_engine=jev)
+    assert [c["model"] for c in llm.calls] == [
+        "deepseek-flash",
+        "deepseek-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+    ]
+
+
+def test_cli_explains_a_missing_provider_key(monkeypatch):
+    from orchestrator.cli import _build_client
+
+    monkeypatch.setenv("SOAR_LLM_PROVIDER", "deepseek")
+    with pytest.raises(SystemExit, match="DEEPSEEK_API_KEY"):
+        _build_client()
+
+
+def test_cli_rejects_an_unknown_provider_cleanly(monkeypatch):
+    from orchestrator.cli import _build_client
+
+    monkeypatch.setenv("SOAR_LLM_PROVIDER", "grok")
+    with pytest.raises(SystemExit, match="SOAR_LLM_PROVIDER"):
+        _build_client()

@@ -9,9 +9,13 @@ from typing import Any
 import pytest
 
 from orchestrator._llm import (
+    MODEL_HAIKU,
+    MODEL_SONNET,
     LLMError,
     StructuredLLMClient,
+    default_models,
     extract_json_object,
+    resolve_provider,
     system_prompt_text,
     wrap_untrusted_event,
 )
@@ -225,3 +229,58 @@ def test_generate_structured_servicing_tool_calls():
     assert len(tool_results) == 1
     assert tool_results[0]["tool_use_id"] == "tu-1"
     assert json.loads(tool_results[0]["content"]) == {"reputation": "malicious"}
+
+
+# --------------------------------------------------------------------------
+# Provider wiring (Anthropic-compatible endpoints). Client construction is
+# pure setup — no request leaves the process — so these stay fully offline.
+# --------------------------------------------------------------------------
+def test_provider_defaults_to_anthropic(monkeypatch):
+    monkeypatch.delenv("SOAR_LLM_PROVIDER", raising=False)
+    assert resolve_provider() == "anthropic"
+    monkeypatch.setenv("SOAR_LLM_PROVIDER", " DeepSeek ")
+    assert resolve_provider() == "deepseek"
+
+
+def test_provider_is_validated(monkeypatch):
+    monkeypatch.setenv("SOAR_LLM_PROVIDER", "grok")
+    with pytest.raises(LLMError, match="SOAR_LLM_PROVIDER"):
+        resolve_provider()
+
+
+def test_default_model_pairs_keep_two_tiers_per_provider():
+    assert default_models("anthropic") == (MODEL_HAIKU, MODEL_SONNET)
+    fast, reasoning = default_models("deepseek")
+    assert fast == "deepseek-flash"
+    assert reasoning == "deepseek-v4-pro"
+    assert fast != reasoning  # the SDE cascade must have a real reasoning tier
+    with pytest.raises(LLMError):
+        default_models("grok")
+
+
+def test_deepseek_client_targets_the_anthropic_compatible_endpoint(monkeypatch):
+    monkeypatch.setenv("SOAR_LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-offline-test")
+    client = StructuredLLMClient()._ensure_client()
+    assert str(client.base_url).rstrip("/").endswith("/anthropic")
+
+
+def test_deepseek_base_url_is_overridable(monkeypatch):
+    monkeypatch.setenv("SOAR_LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-offline-test")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://proxy.internal/anthropic")
+    client = StructuredLLMClient()._ensure_client()
+    assert str(client.base_url).startswith("https://proxy.internal")
+
+
+def test_deepseek_without_key_is_a_clear_error(monkeypatch):
+    monkeypatch.setenv("SOAR_LLM_PROVIDER", "deepseek")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.raises(LLMError, match="DEEPSEEK_API_KEY"):
+        StructuredLLMClient()._ensure_client()
+
+
+def test_anthropic_without_key_is_a_clear_error(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(LLMError, match="ANTHROPIC_API_KEY"):
+        StructuredLLMClient()._ensure_client()

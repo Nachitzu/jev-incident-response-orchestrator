@@ -25,7 +25,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from orchestrator._llm import LLMError, StructuredLLMClient
+from orchestrator._llm import (
+    LLMError,
+    StructuredLLMClient,
+    default_models,
+    resolve_provider,
+)
 from orchestrator.agents import DetectorAgent, InvestigatorAgent, ResponderAgent
 from orchestrator.schemas import (
     SEVERITY_ORDER,
@@ -65,6 +70,8 @@ def run_case(
     jev_engine: Any | None = None,
     incident_id: str | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    fast_model: str | None = None,
+    reasoning_model: str | None = None,
 ) -> CaseReport:
     """Run one scenario end to end and return its case report.
 
@@ -72,9 +79,17 @@ def run_case(
     (then highest-confidence) one carries the case. `incident_id` only renames
     a dropped case (where no agent ever named a real incident); escalated cases
     keep the id the detector actually reasoned about.
+
+    Model tiers default to the configured provider's (fast, reasoning) pair —
+    the detector and the first SDE step run fast, the escalated step and the
+    responder reason. Explicit `fast_model`/`reasoning_model` override that.
     """
     if not events:
         raise OrchestratorError("run_case() needs at least one event")
+
+    default_fast, default_reasoning = default_models(resolve_provider())
+    fast = fast_model or default_fast
+    reasoning = reasoning_model or default_reasoning
 
     llm = llm_client or StructuredLLMClient()
     audit: list[AuditEntry] = []
@@ -82,6 +97,7 @@ def run_case(
     detector = DetectorAgent(
         llm_client=llm,
         jev_engine=jev_engine,
+        model=fast,
         fp_noul_threshold=_env_float("SOAR_FP_NOUL_THRESHOLD", 0.25),
         confidence_floor=_env_float("SOAR_HITL_CONFIDENCE_MIN", 0.70),
     )
@@ -140,7 +156,12 @@ def run_case(
         )
     )
 
-    investigator = InvestigatorAgent(llm_client=llm, jev_engine=jev_engine)
+    investigator = InvestigatorAgent(
+        llm_client=llm,
+        jev_engine=jev_engine,
+        fast_model=fast,
+        reasoning_model=reasoning,
+    )
     try:
         investigation, inv_audit = investigator.run(incident, event)
     except LLMError as exc:
@@ -152,7 +173,7 @@ def run_case(
         )
     audit.extend(inv_audit)
 
-    responder = ResponderAgent(llm_client=llm, jev_engine=jev_engine)
+    responder = ResponderAgent(llm_client=llm, jev_engine=jev_engine, model=reasoning)
     try:
         plan, resp_audit = responder.run(incident, investigation)
     except LLMError as exc:
